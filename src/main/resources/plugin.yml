@@ -10,6 +10,11 @@ commands:
     description: Add snow layers across the resort area
     usage: /updatesnow <layers_to_add>
     permission: snowsim.update
+    
+  snowsim:
+    description: SnowSim utilities
+    usage: /snowsim calibrate
+    permission: snowsim.update
 
 permissions:
   snowsim.update:
