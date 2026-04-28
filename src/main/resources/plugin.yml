@@ -1,5 +1,5 @@
 name: SnowSim
-version: 1.0.0
+version: 1.1.0
 main: com.skiresort.snowsim.SnowSim
 api-version: 1.20
 description: Snow depth simulation for ski resorts
@@ -7,16 +7,19 @@ authors: [SkiResort]
 
 commands:
   updatesnow:
-    description: Add snow layers across the resort area
-    usage: /updatesnow <layers_to_add>
+    description: Set absolute snow depth (cm) across the resort
+    usage: /updatesnow <depth_cm>
     permission: snowsim.update
-    
-  # snowsim:
-  #   description: SnowSim utilities
-  #   usage: /snowsim calibrate
-  #   permission: snowsim.update
+  snowsample:
+    description: Measure current snow at reference points and calculate deltas
+    usage: /snowsample <base_cm> <mid_cm> <peak_cm> <mammoth_cm>
+    permission: snowsim.update
+  snowapply:
+    description: Apply cached deltas from /snowsample across the resort
+    usage: /snowapply
+    permission: snowsim.update
 
 permissions:
   snowsim.update:
-    description: Allows use of /updatesnow
+    description: Allows use of all SnowSim commands
     default: op
