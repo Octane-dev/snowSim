@@ -8,7 +8,7 @@ bounding-box:
   x1: -22
   z1: 301
   x2: 2451
-  z2: 3047
+  z2: -3047
 
 # Reference points — one per elevation zone.
 # y should be the ground block at that location (snow is measured above it).
@@ -30,17 +30,28 @@ reference-points:
     y: 646
     z: -1930
 
-# Interpolation settings.
-# elevation-weight: how much elevation drives the delta vs XZ proximity (0.0 - 1.0).
-#   0.7 = 70% elevation, 30% XZ distance. Higher = snow depth tracks altitude more closely.
-# idw-power: sharpness of the IDW falloff. Higher = each reference point influences
-#   a tighter area around itself. 2.0 is a good default.
+# Interpolation settings for /snowapply.
+# elevation-weight: 0.0-1.0, how much elevation drives depth vs XZ proximity.
+# idw-power: sharpness of falloff. Higher = tighter influence per reference point.
 interpolation:
   elevation-weight: 0.7
   idw-power: 2.0
 
+# Drift settings for /snowdrift.
+# scan-distance:       how far upwind to look for shelter, in blocks.
+# fan-angle:           degrees either side of wind direction to scan (total arc = 2x this).
+# max-drift-cm:        deepest a sheltered deposit can get from drift alone.
+# max-scour-cm:        most an exposed column can lose per drift pass.
+# scour-threshold-cm:  columns with more snow than this are never scoured (deep base is safe).
+drift:
+  scan-distance: 80
+  fan-angle: 30
+  max-drift-cm: 600.0
+  max-scour-cm: 40.0
+  scour-threshold-cm: 50.0
+
 # Cosmetic variance — randomises the top partial snow layer for a natural look.
-# snow-variance: +/- layer range when adding snow (e.g. 1 = target±1 layer).
+# snow-variance: +/- layer range when adding snow.
 # melt-variance: gap width when removing snow, creates patchy differential melt.
 cosmetic:
   snow-variance: 1
