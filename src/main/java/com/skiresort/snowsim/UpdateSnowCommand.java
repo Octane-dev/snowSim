@@ -234,16 +234,27 @@ public class UpdateSnowCommand implements CommandExecutor {
             }
         }
 
-        // Write new snow
+        // Write new snow — stop if we hit a non-air block (don't overwrite builds)
         int fullBlocks = newLayers / 8;
         int remainingLayers = newLayers % 8;
 
         for (int i = 0; i < fullBlocks; i++) {
-            world.getBlockAt(x, writeY + i, z).setType(Material.SNOW_BLOCK, false);
+            Block b = world.getBlockAt(x, writeY + i, z);
+            if (b.getType() != Material.AIR && b.getType() != Material.SNOW && b.getType() != Material.SNOW_BLOCK) {
+                // Hit something solid above ground — stop here
+                callback.accept(true);
+                return;
+            }
+            b.setType(Material.SNOW_BLOCK, false);
         }
 
         if (remainingLayers > 0) {
             Block topSnow = world.getBlockAt(x, writeY + fullBlocks, z);
+            if (topSnow.getType() != Material.AIR && topSnow.getType() != Material.SNOW) {
+                // Hit something solid — stop, don't place partial layer
+                callback.accept(true);
+                return;
+            }
             topSnow.setType(Material.SNOW, false);
             Snow snowData = (Snow) topSnow.getBlockData();
             snowData.setLayers(remainingLayers);
