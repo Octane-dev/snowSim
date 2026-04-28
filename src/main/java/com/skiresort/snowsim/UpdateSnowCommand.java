@@ -11,6 +11,10 @@ import java.util.*;
 public class UpdateSnowCommand implements CommandExecutor {
 
     private final SnowSim plugin;
+    private final Random random = new Random();
+
+    // 1 layer = 12.5cm, 8 layers = 1 block = 100cm = 1 metre
+    private static final double CM_PER_LAYER = 12.5;
 
     // Ground blocks that snow can settle on
     private static final Set<Material> GROUND_BLOCKS = EnumSet.of(
@@ -46,33 +50,43 @@ public class UpdateSnowCommand implements CommandExecutor {
         }
 
         if (args.length != 1) {
-            sender.sendMessage(ChatColor.YELLOW + "Usage: /updatesnow <layers_to_add>");
-            sender.sendMessage(ChatColor.YELLOW + "  Layers are in snow layer units (8 layers = 1 snow block).");
-            sender.sendMessage(ChatColor.YELLOW + "  Example: /updatesnow 8  →  adds 1 full snow block of depth everywhere.");
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /updatesnow <depth_in_cm>");
+            sender.sendMessage(ChatColor.YELLOW + "  Sets the target snow depth across the resort.");
+            sender.sendMessage(ChatColor.YELLOW + "  1 block = 100cm = 1m.  1 layer = 12.5cm.");
+            sender.sendMessage(ChatColor.YELLOW + "  Snow will be added or removed to reach the target.");
+            sender.sendMessage(ChatColor.YELLOW + "  Examples:");
+            sender.sendMessage(ChatColor.YELLOW + "    /updatesnow 50   -> 50cm (4 layers)");
+            sender.sendMessage(ChatColor.YELLOW + "    /updatesnow 100  -> 1m (1 full snow block)");
+            sender.sendMessage(ChatColor.YELLOW + "    /updatesnow 200  -> 2m (2 snow blocks)");
             return true;
         }
 
-        int layersToAdd;
+        double targetCm;
         try {
-            layersToAdd = Integer.parseInt(args[0]);
+            targetCm = Double.parseDouble(args[0]);
         } catch (NumberFormatException e) {
             sender.sendMessage(ChatColor.RED + "Invalid number: " + args[0]);
             return true;
         }
 
-        if (layersToAdd <= 0) {
-            sender.sendMessage(ChatColor.RED + "Layers to add must be a positive number.");
+        if (targetCm < 0) {
+            sender.sendMessage(ChatColor.RED + "Depth must be 0 or greater.");
             return true;
         }
 
+        // Convert cm to layers (round to nearest layer)
+        int targetLayers = (int) Math.round(targetCm / CM_PER_LAYER);
+
         // Load config values
-        String worldName = plugin.getConfig().getString("world", "world");
-        int x1 = plugin.getConfig().getInt("bounding-box.x1", -22);
-        int z1 = plugin.getConfig().getInt("bounding-box.z1", 301);
-        int x2 = plugin.getConfig().getInt("bounding-box.x2", 2451);
-        int z2 = plugin.getConfig().getInt("bounding-box.z2", 3047);
-        int scanFromY = plugin.getConfig().getInt("scan-from-y", 700);
-        int columnsPerTick = plugin.getConfig().getInt("columns-per-tick", 1000);
+        String worldName  = plugin.getConfig().getString("world", "world");
+        int x1            = plugin.getConfig().getInt("bounding-box.x1", -22);
+        int z1            = plugin.getConfig().getInt("bounding-box.z1", 301);
+        int x2            = plugin.getConfig().getInt("bounding-box.x2", 2451);
+        int z2            = plugin.getConfig().getInt("bounding-box.z2", 3047);
+        int scanFromY     = plugin.getConfig().getInt("scan-from-y", 700);
+        int colsPerTick   = plugin.getConfig().getInt("columns-per-tick", 1000);
+        int snowVariance  = plugin.getConfig().getInt("cosmetic.snow-variance", 1);
+        int meltVariance  = plugin.getConfig().getInt("cosmetic.melt-variance", 2);
 
         World world = Bukkit.getWorld(worldName);
         if (world == null) {
@@ -80,68 +94,65 @@ public class UpdateSnowCommand implements CommandExecutor {
             return true;
         }
 
-        // Normalise bounding box so x1<=x2, z1<=z2
         int minX = Math.min(x1, x2);
         int maxX = Math.max(x1, x2);
         int minZ = Math.min(z1, z2);
         int maxZ = Math.max(z1, z2);
-
         int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
 
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting snow update...");
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Area: " + (maxX - minX + 1) + " x " + (maxZ - minZ + 1)
+        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Target depth: " + targetCm + "cm"
+                + " = " + targetLayers + " layers"
+                + " = " + String.format("%.2f", targetLayers / 8.0) + " snow blocks.");
+        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Area: "
+                + (maxX - minX + 1) + " x " + (maxZ - minZ + 1)
                 + " = " + String.format("%,d", totalColumns) + " columns.");
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Adding " + layersToAdd + " layer(s) (" 
-                + layersToAdd + "/8 = ~" + String.format("%.1f", layersToAdd / 8.0) + " snow blocks).");
-        sender.sendMessage(ChatColor.GRAY + "This may take a while. Progress will be reported every 10%.");
+        sender.sendMessage(ChatColor.GRAY + "Progress reported every 10%.");
 
-        final int fLayersToAdd = layersToAdd;
-        final int fScanFromY = scanFromY;
-        final int fColumnsPerTick = columnsPerTick;
+        final int fTargetLayers = targetLayers;
+        final int fScanFromY    = scanFromY;
+        final int fColsPerTick  = colsPerTick;
+        final int fSnowVariance = snowVariance;
+        final int fMeltVariance = meltVariance;
 
-        // Build list of all columns to process
-        // We process in chunks to avoid freezing the server
         new BukkitRunnable() {
             int x = minX;
             int z = minZ;
-            int processed = 0;
-            int modified = 0;
+            int processed  = 0;
+            int added      = 0;
+            int removed    = 0;
+            int unchanged  = 0;
             int lastReportedPercent = 0;
 
             @Override
             public void run() {
                 int doneThisTick = 0;
 
-                while (doneThisTick < fColumnsPerTick) {
+                while (doneThisTick < fColsPerTick) {
                     if (x > maxX) {
-                        // Done
                         this.cancel();
-                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Done! Processed "
-                                + String.format("%,d", processed) + " columns, modified "
-                                + String.format("%,d", modified) + " columns.");
+                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Done!"
+                                + " Added: "     + String.format("%,d", added)
+                                + "  Melted: "   + String.format("%,d", removed)
+                                + "  Unchanged: " + String.format("%,d", unchanged));
                         return;
                     }
 
-                    processColumn(world, x, z, fScanFromY, fLayersToAdd, result -> {
-                        if (result) modified++;
-                    });
+                    int result = processColumn(world, x, z, fScanFromY, fTargetLayers, fSnowVariance, fMeltVariance);
+                    if      (result > 0) added++;
+                    else if (result < 0) removed++;
+                    else                 unchanged++;
 
                     processed++;
                     doneThisTick++;
 
-                    // Advance position
                     z++;
-                    if (z > maxZ) {
-                        z = minZ;
-                        x++;
-                    }
+                    if (z > maxZ) { z = minZ; x++; }
 
-                    // Report progress every 10%
                     int percent = (int) ((processed / (double) totalColumns) * 100);
                     if (percent >= lastReportedPercent + 10) {
                         lastReportedPercent = percent - (percent % 10);
-                        sender.sendMessage(ChatColor.GRAY + "[SnowSim] " + lastReportedPercent + "% complete ("
-                                + String.format("%,d", processed) + " / " + String.format("%,d", totalColumns) + ")");
+                        sender.sendMessage(ChatColor.GRAY + "[SnowSim] " + lastReportedPercent + "% -- "
+                                + String.format("%,d", processed) + " / " + String.format("%,d", totalColumns));
                     }
                 }
             }
@@ -151,27 +162,19 @@ public class UpdateSnowCommand implements CommandExecutor {
     }
 
     /**
-     * Process a single X/Z column:
-     * 1. Scan down from scanFromY to find first snow or ground block
-     * 2. Measure current depth in layer units
-     * 3. Add layersToAdd
-     * 4. Write back the result
+     * Process one X/Z column.
+     * Returns: +1 if snow was added, -1 if snow was removed, 0 if unchanged or skipped.
      */
-    private void processColumn(World world, int x, int z, int scanFromY, int layersToAdd, java.util.function.Consumer<Boolean> callback) {
-        // Scan downward to find the surface
+    private int processColumn(World world, int x, int z, int scanFromY,
+                              int targetLayers, int snowVariance, int meltVariance) {
+
+        // 1. Find the surface
         int surfaceY = -1;
         boolean startsOnSnow = false;
 
         for (int y = scanFromY; y >= world.getMinHeight(); y--) {
-            Block block = world.getBlockAt(x, y, z);
-            Material mat = block.getType();
-
-            if (mat == Material.SNOW) {
-                // Snow layers sitting on top - this is the top of the snow
-                surfaceY = y;
-                startsOnSnow = true;
-                break;
-            } else if (mat == Material.SNOW_BLOCK) {
+            Material mat = world.getBlockAt(x, y, z).getType();
+            if (mat == Material.SNOW || mat == Material.SNOW_BLOCK) {
                 surfaceY = y;
                 startsOnSnow = true;
                 break;
@@ -180,87 +183,101 @@ public class UpdateSnowCommand implements CommandExecutor {
                 startsOnSnow = false;
                 break;
             }
-            // Air, leaves, etc. — keep scanning down
         }
 
-        if (surfaceY == -1) {
-            callback.accept(false);
-            return;
-        }
+        if (surfaceY == -1) return 0;
 
-        // Measure current depth in layer units
+        // 2. Measure current depth in layers
         int currentLayers = 0;
+        int groundY = surfaceY;
 
         if (startsOnSnow) {
             Block topBlock = world.getBlockAt(x, surfaceY, z);
+            int scanStart = surfaceY;
 
             if (topBlock.getType() == Material.SNOW) {
-                // Count the partial layer on top
                 Snow snowData = (Snow) topBlock.getBlockData();
                 currentLayers += snowData.getLayers();
-                surfaceY--; // look below for snow blocks
+                scanStart--;
             }
 
-            // Count solid snow blocks below
-            for (int y = surfaceY; y >= world.getMinHeight(); y--) {
+            for (int y = scanStart; y >= world.getMinHeight(); y--) {
                 Block b = world.getBlockAt(x, y, z);
                 if (b.getType() == Material.SNOW_BLOCK) {
                     currentLayers += 8;
                 } else {
-                    // Hit ground or something else — this is the actual ground
-                    surfaceY = y; // surfaceY is now the ground block
+                    groundY = y;
                     break;
                 }
             }
         }
-        // If startsOnSnow==false, surfaceY is the ground block and currentLayers=0
 
-        int newLayers = currentLayers + layersToAdd;
+        if (currentLayers == targetLayers) return 0;
 
-        // Write back
-        // Clear any existing snow above the ground block first
-        // Ground block stays at surfaceY, snow goes from surfaceY+1 upward
-        int writeY = surfaceY + 1;
+        boolean isAdding = targetLayers > currentLayers;
 
-        // Clear old snow above ground (in case we're overwriting existing snow)
-        // We only need to clear as high as old snow reached
-        int oldSnowBlocks = currentLayers / 8;
-        int oldTopLayers = currentLayers % 8;
-        int clearUpTo = surfaceY + oldSnowBlocks + (oldTopLayers > 0 ? 1 : 0);
-        for (int y = surfaceY + 1; y <= clearUpTo; y++) {
-            Block b = world.getBlockAt(x, y, z);
-            if (b.getType() == Material.SNOW_BLOCK || b.getType() == Material.SNOW) {
-                b.setType(Material.AIR, false);
+        // 3. Apply cosmetic variance to the top partial layer only
+        int baseBlocks    = targetLayers / 8;
+        int baseRemaining = targetLayers % 8;
+        int topLayers;
+
+        if (baseRemaining == 0) {
+            topLayers = 0;
+        } else if (isAdding) {
+            // Snow falling: small variance +/- snowVariance layers
+            int variance = (snowVariance > 0) ? random.nextInt(snowVariance * 2 + 1) - snowVariance : 0;
+            topLayers = Math.max(1, Math.min(7, baseRemaining + variance));
+        } else {
+            // Melting: pick from outside a gap around target to look patchy
+            if (meltVariance > 0) {
+                int low  = Math.max(1, baseRemaining - meltVariance);
+                int high = Math.min(7, baseRemaining + meltVariance);
+                List<Integer> candidates = new ArrayList<>();
+                for (int i = 1; i < low; i++)        candidates.add(i);
+                for (int i = high + 1; i <= 7; i++)  candidates.add(i);
+                topLayers = candidates.isEmpty() ? baseRemaining
+                                                 : candidates.get(random.nextInt(candidates.size()));
+            } else {
+                topLayers = baseRemaining;
             }
         }
 
-        // Write new snow — stop if we hit a non-air block (don't overwrite builds)
-        int fullBlocks = newLayers / 8;
-        int remainingLayers = newLayers % 8;
+        // 4. Clear existing snow
+        int oldSnowBlocks = currentLayers / 8;
+        int oldTopLayers  = currentLayers % 8;
+        int clearUpTo     = groundY + oldSnowBlocks + (oldTopLayers > 0 ? 1 : 0);
 
-        for (int i = 0; i < fullBlocks; i++) {
+        for (int y = groundY + 1; y <= clearUpTo; y++) {
+            Material mat = world.getBlockAt(x, y, z).getType();
+            if (mat == Material.SNOW_BLOCK || mat == Material.SNOW) {
+                world.getBlockAt(x, y, z).setType(Material.AIR, false);
+            }
+        }
+
+        if (targetLayers == 0) return currentLayers > 0 ? -1 : 0;
+
+        // 5. Write new snow
+        int writeY = groundY + 1;
+
+        for (int i = 0; i < baseBlocks; i++) {
             Block b = world.getBlockAt(x, writeY + i, z);
             if (b.getType() != Material.AIR && b.getType() != Material.SNOW && b.getType() != Material.SNOW_BLOCK) {
-                // Hit something solid above ground — stop here
-                callback.accept(true);
-                return;
+                return isAdding ? 1 : -1;
             }
             b.setType(Material.SNOW_BLOCK, false);
         }
 
-        if (remainingLayers > 0) {
-            Block topSnow = world.getBlockAt(x, writeY + fullBlocks, z);
+        if (topLayers > 0) {
+            Block topSnow = world.getBlockAt(x, writeY + baseBlocks, z);
             if (topSnow.getType() != Material.AIR && topSnow.getType() != Material.SNOW) {
-                // Hit something solid — stop, don't place partial layer
-                callback.accept(true);
-                return;
+                return isAdding ? 1 : -1;
             }
             topSnow.setType(Material.SNOW, false);
             Snow snowData = (Snow) topSnow.getBlockData();
-            snowData.setLayers(remainingLayers);
+            snowData.setLayers(topLayers);
             topSnow.setBlockData(snowData, false);
         }
 
-        callback.accept(true);
+        return isAdding ? 1 : -1;
     }
 }
