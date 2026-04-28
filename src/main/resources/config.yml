@@ -16,3 +16,32 @@ bounding-box:
   z1: 301
   x2: 2451
   z2: 3047
+
+# Cosmetic variance - makes snow look natural rather than perfectly uniform.
+# snow-variance: when adding snow, the top partial layer is randomised +/- this many layers.
+#   e.g. 1 means target layer 4 could place 3, 4, or 5.
+# melt-variance: when removing snow, the top partial layer avoids the exact target,
+#   picking from values outside a band of this width either side.
+#   e.g. 2 means target layer 4 skips layers 2-6, picking from 1 or 7 instead.
+#   This creates a patchy differential melt look.
+cosmetic:
+  snow-variance: 0
+  melt-variance: 0
+
+# Base calibration points
+# 1: Base Station
+# 2: Mid Mountain
+# 3: Heaven's Peak
+# 4: Mammoth Peak
+
+current-base-layers: 40
+
+reference-points:
+- x: 693
+  z: 77
+- x: 606
+  z: -503
+- x: 568
+  z: -1000
+- x: 2342
+  z: -1929
