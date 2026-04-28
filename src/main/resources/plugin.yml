@@ -1,5 +1,5 @@
 name: SnowSim
-version: 1.2.0
+version: 1.3.0
 main: com.skiresort.snowsim.SnowSim
 api-version: 1.20
 description: Snow depth simulation for ski resorts
@@ -25,6 +25,10 @@ commands:
   snowreload:
     description: Reload SnowSim config without restarting the server
     usage: /snowreload
+    permission: snowsim.update
+  snowdrift:
+    description: Apply wind drift pass across the resort
+    usage: /snowdrift <wind_direction> [wind_strength]
     permission: snowsim.update
 
 permissions:
