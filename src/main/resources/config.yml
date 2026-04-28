@@ -1,0 +1,18 @@
+# SnowSim Configuration
+# ----------------------
+# world: The name of your Minecraft world (usually "world")
+# scan-from-y: The highest Y level to start scanning from (set to your mountain peak + a bit)
+# columns-per-tick: How many columns to process per server tick.
+#   Higher = faster but more server load. 1000 is a safe default for Aternos.
+#   If you notice lag, lower this to 500.
+# bounding-box: The X/Z corners of your resort area.
+
+world: world
+scan-from-y: 700
+columns-per-tick: 1000
+
+bounding-box:
+  x1: -22
+  z1: 301
+  x2: 2451
+  z2: 3047

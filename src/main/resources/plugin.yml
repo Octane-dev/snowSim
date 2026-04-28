@@ -1,0 +1,17 @@
+name: SnowSim
+version: 1.0.0
+main: com.skiresort.snowsim.SnowSim
+api-version: 1.20.1
+description: Snow depth simulation for ski resorts
+authors: [SkiResort]
+
+commands:
+  updatesnow:
+    description: Add snow layers across the resort area
+    usage: /updatesnow <layers_to_add>
+    permission: snowsim.update
+
+permissions:
+  snowsim.update:
+    description: Allows use of /updatesnow
+    default: op
