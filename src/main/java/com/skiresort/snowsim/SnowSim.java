@@ -5,6 +5,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 public class SnowSim extends JavaPlugin {
 
     private int[] cachedDeltas = null;
+    private boolean driftRunning = false;
 
     @Override
     public void onEnable() {
@@ -14,6 +15,7 @@ public class SnowSim extends JavaPlugin {
         getCommand("snowapply").setExecutor(new SnowApplyCommand(this));
         getCommand("snowreport").setExecutor(new SnowReportCommand(this));
         getCommand("snowreload").setExecutor(new SnowReloadCommand(this));
+        getCommand("snowdrift").setExecutor(new SnowDriftCommand(this));
         getLogger().info("SnowSim enabled.");
     }
 
@@ -22,6 +24,8 @@ public class SnowSim extends JavaPlugin {
         getLogger().info("SnowSim disabled.");
     }
 
-    public int[] getCachedDeltas() { return cachedDeltas; }
-    public void setCachedDeltas(int[] deltas) { this.cachedDeltas = deltas; }
+    public int[]   getCachedDeltas()            { return cachedDeltas; }
+    public void    setCachedDeltas(int[] deltas) { this.cachedDeltas = deltas; }
+    public boolean isDriftRunning()              { return driftRunning; }
+    public void    setDriftRunning(boolean b)    { this.driftRunning = b; }
 }
