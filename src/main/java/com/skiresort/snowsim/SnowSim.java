@@ -8,6 +8,8 @@ public class SnowSim extends JavaPlugin {
     public void onEnable() {
         saveDefaultConfig();
         getCommand("updatesnow").setExecutor(new UpdateSnowCommand(this));
+        getCommand("snowsim").setExecutor(new SnowSimCommand(this));
+        
         getLogger().info("SnowSim enabled.");
     }
 
