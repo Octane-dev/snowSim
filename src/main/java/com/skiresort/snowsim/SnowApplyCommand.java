@@ -24,19 +24,17 @@ public class SnowApplyCommand implements CommandExecutor {
             return true;
         }
 
-        // Check cached deltas exist
         int[] deltas = plugin.getCachedDeltas();
         if (deltas == null) {
             sender.sendMessage(ChatColor.RED + "[SnowSim] No sample data found. Run /snowsample first.");
             return true;
         }
 
-        // Load config
         String worldName  = plugin.getConfig().getString("world", "world");
         int x1            = plugin.getConfig().getInt("bounding-box.x1", -22);
         int z1            = plugin.getConfig().getInt("bounding-box.z1", 301);
         int x2            = plugin.getConfig().getInt("bounding-box.x2", 2451);
-        int z2            = plugin.getConfig().getInt("bounding-box.z2", 3047);
+        int z2            = plugin.getConfig().getInt("bounding-box.z2", -3047);
         int scanFromY     = plugin.getConfig().getInt("scan-from-y", 700);
         int colsPerTick   = plugin.getConfig().getInt("columns-per-tick", 1000);
         int snowVariance  = plugin.getConfig().getInt("cosmetic.snow-variance", 1);
@@ -50,7 +48,6 @@ public class SnowApplyCommand implements CommandExecutor {
             return true;
         }
 
-        // Rebuild ref points from cache
         RefPoint[] refs = new RefPoint[4];
         String[] names = {"base", "mid", "peak", "mammoth"};
         for (int i = 0; i < 4; i++) {
@@ -60,72 +57,58 @@ public class SnowApplyCommand implements CommandExecutor {
             refs[i] = new RefPoint(names[i], rx, ry, rz, 0);
         }
 
-        int minX = Math.min(x1, x2);
-        int maxX = Math.max(x1, x2);
-        int minZ = Math.min(z1, z2);
-        int maxZ = Math.max(z1, z2);
+        int minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+        int minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
         int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
 
         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Applying snow deltas across resort...");
         sender.sendMessage(ChatColor.AQUA + "[SnowSim] "
-                + String.format("%,d", totalColumns) + " columns. "
-                + "Elev weight: " + elevWeight + "  IDW power: " + idwPower);
-        sender.sendMessage(ChatColor.GRAY + "Progress reported every 10%. Run /snowsample again anytime to recalculate.");
+                + String.format("%,d", totalColumns) + " columns.");
+        sender.sendMessage(ChatColor.GRAY + "Progress reported every 10%.");
 
-        final int[]      fDeltas       = deltas;
-        final RefPoint[] fRefs         = refs;
-        final int        fScanFromY    = scanFromY;
-        final int        fColsPerTick  = colsPerTick;
-        final int        fSnowVariance = snowVariance;
-        final int        fMeltVariance = meltVariance;
-        final double     fElevWeight   = elevWeight;
-        final double     fIdwPower     = idwPower;
+        final int[]      fDeltas      = deltas;
+        final RefPoint[] fRefs        = refs;
+        final int        fScanFromY   = scanFromY;
+        final int        fColsPerTick = colsPerTick;
+        final int        fSnowVar     = snowVariance;
+        final int        fMeltVar     = meltVariance;
+        final double     fElevWeight  = elevWeight;
+        final double     fIdwPower    = idwPower;
 
         new BukkitRunnable() {
-            int x = minX;
-            int z = minZ;
-            int processed  = 0;
-            int added      = 0;
-            int removed    = 0;
-            int unchanged  = 0;
-            int lastReportedPercent = 0;
+            int x = minX, z = minZ;
+            int processed = 0, added = 0, removed = 0, unchanged = 0;
+            int lastPct = 0;
 
             @Override
             public void run() {
-                int doneThisTick = 0;
-
-                while (doneThisTick < fColsPerTick) {
+                int done = 0;
+                while (done < fColsPerTick) {
                     if (x > maxX) {
                         this.cancel();
-                        // Clear the cache once applied
                         plugin.setCachedDeltas(null);
                         sender.sendMessage(ChatColor.GREEN + "[SnowSim] Apply complete!"
-                                + "  Added: "      + String.format("%,d", added)
-                                + "  Melted: "     + String.format("%,d", removed)
-                                + "  Unchanged: "  + String.format("%,d", unchanged));
+                                + "  Added: "     + String.format("%,d", added)
+                                + "  Melted: "    + String.format("%,d", removed)
+                                + "  Unchanged: " + String.format("%,d", unchanged));
                         return;
                     }
 
                     int result = processColumn(world, x, z, fScanFromY,
-                            fRefs, fDeltas, fElevWeight, fIdwPower,
-                            fSnowVariance, fMeltVariance);
-
+                            fRefs, fDeltas, fElevWeight, fIdwPower, fSnowVar, fMeltVar);
                     if      (result > 0) added++;
                     else if (result < 0) removed++;
                     else                 unchanged++;
 
-                    processed++;
-                    doneThisTick++;
-
+                    processed++; done++;
                     z++;
                     if (z > maxZ) { z = minZ; x++; }
 
-                    int percent = (int) ((processed / (double) totalColumns) * 100);
-                    if (percent >= lastReportedPercent + 10) {
-                        lastReportedPercent = percent - (percent % 10);
-                        sender.sendMessage(ChatColor.GRAY + "[SnowSim] " + lastReportedPercent + "% -- "
-                                + String.format("%,d", processed) + " / "
-                                + String.format("%,d", totalColumns));
+                    int pct = (int)((processed / (double)totalColumns) * 100);
+                    if (pct >= lastPct + 10) {
+                        lastPct = pct - (pct % 10);
+                        sender.sendMessage(ChatColor.GRAY + "[SnowSim] " + lastPct + "% -- "
+                                + String.format("%,d", processed) + " / " + String.format("%,d", totalColumns));
                     }
                 }
             }
@@ -139,61 +122,41 @@ public class SnowApplyCommand implements CommandExecutor {
                               double elevWeight, double idwPower,
                               int snowVariance, int meltVariance) {
 
-        // 1. Find the surface (scan down for snow or ground)
-        int surfaceY = -1;
-        boolean startsOnSnow = false;
+        // 1. Find true ground (ignores snow)
+        int groundY = SnowUtil.findGroundY(world, x, z, scanFromY);
+        if (groundY == -1) return 0;
 
-        for (int y = scanFromY; y >= world.getMinHeight(); y--) {
-            Material mat = world.getBlockAt(x, y, z).getType();
-            if (mat == Material.SNOW || mat == Material.SNOW_BLOCK) {
-                surfaceY = y;
-                startsOnSnow = true;
-                break;
-            } else if (SnowUtil.GROUND_BLOCKS.contains(mat)) {
-                surfaceY = y;
-                startsOnSnow = false;
-                break;
-            }
-        }
+        // 2. Measure depth upward from ground
+        int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
 
-        if (surfaceY == -1) return 0;
-
-        // 2. Measure current depth
-        int currentLayers = 0;
-        int groundY = surfaceY;
-
-        if (startsOnSnow) {
-            Block topBlock = world.getBlockAt(x, surfaceY, z);
-            int scanStart = surfaceY;
-
-            if (topBlock.getType() == Material.SNOW) {
-                Snow sd = (Snow) topBlock.getBlockData();
-                currentLayers += sd.getLayers();
-                scanStart--;
-            }
-
-            for (int y = scanStart; y >= world.getMinHeight(); y--) {
-                if (world.getBlockAt(x, y, z).getType() == Material.SNOW_BLOCK) {
-                    currentLayers += 8;
-                } else {
-                    groundY = y;
-                    break;
-                }
-            }
-        }
-
-        // 3. Interpolate the delta for this column's elevation
+        // 3. Interpolate delta for this column's elevation
         double rawDelta = SnowUtil.interpolateDelta(x, groundY, z, refs, deltas, elevWeight, idwPower);
         int intDelta = (int) Math.round(rawDelta);
-
         if (intDelta == 0) return 0;
 
         int newLayers = Math.max(0, currentLayers + intDelta);
         if (newLayers == currentLayers) return 0;
 
+        return writeSnow(world, x, groundY, z, currentLayers, newLayers, snowVariance, meltVariance);
+    }
+
+    /**
+     * Shared snow writing logic — clears old snow, writes new snow with cosmetic variance.
+     * Returns +1 added, -1 removed, 0 unchanged.
+     */
+    static int writeSnow(World world, int x, int groundY, int z,
+                         int currentLayers, int newLayers,
+                         int snowVariance, int meltVariance) {
+        return writeSnow(world, x, groundY, z, currentLayers, newLayers, snowVariance, meltVariance, new Random());
+    }
+
+    static int writeSnow(World world, int x, int groundY, int z,
+                         int currentLayers, int newLayers,
+                         int snowVariance, int meltVariance, Random random) {
+
         boolean isAdding = newLayers > currentLayers;
 
-        // 4. Cosmetic variance on the top partial layer
+        // Cosmetic variance on top partial layer only
         int baseBlocks    = newLayers / 8;
         int baseRemaining = newLayers % 8;
         int topLayers;
@@ -201,58 +164,50 @@ public class SnowApplyCommand implements CommandExecutor {
         if (baseRemaining == 0) {
             topLayers = 0;
         } else if (isAdding) {
-            int variance = (snowVariance > 0) ? random.nextInt(snowVariance * 2 + 1) - snowVariance : 0;
-            topLayers = Math.max(1, Math.min(7, baseRemaining + variance));
+            int v = (snowVariance > 0) ? random.nextInt(snowVariance * 2 + 1) - snowVariance : 0;
+            topLayers = Math.max(1, Math.min(7, baseRemaining + v));
         } else {
             if (meltVariance > 0) {
                 int low  = Math.max(1, baseRemaining - meltVariance);
                 int high = Math.min(7, baseRemaining + meltVariance);
-                List<Integer> candidates = new ArrayList<>();
-                for (int i = 1;      i < low;  i++) candidates.add(i);
-                for (int i = high+1; i <= 7;   i++) candidates.add(i);
-                topLayers = candidates.isEmpty() ? baseRemaining
-                                                 : candidates.get(random.nextInt(candidates.size()));
+                List<Integer> c = new ArrayList<>();
+                for (int i = 1;      i < low;  i++) c.add(i);
+                for (int i = high+1; i <= 7;   i++) c.add(i);
+                topLayers = c.isEmpty() ? baseRemaining : c.get(random.nextInt(c.size()));
             } else {
                 topLayers = baseRemaining;
             }
         }
 
-        // 5. Clear old snow
-        int oldSnowBlocks = currentLayers / 8;
-        int oldTopLayers  = currentLayers % 8;
-        int clearUpTo     = groundY + oldSnowBlocks + (oldTopLayers > 0 ? 1 : 0);
-
+        // Clear old snow above ground
+        int oldBlocks    = currentLayers / 8;
+        int oldRemaining = currentLayers % 8;
+        int clearUpTo    = groundY + oldBlocks + (oldRemaining > 0 ? 1 : 0);
         for (int y = groundY + 1; y <= clearUpTo; y++) {
             Material mat = world.getBlockAt(x, y, z).getType();
-            if (mat == Material.SNOW_BLOCK || mat == Material.SNOW) {
+            if (mat == Material.SNOW_BLOCK || mat == Material.SNOW)
                 world.getBlockAt(x, y, z).setType(Material.AIR, false);
-            }
         }
 
         if (newLayers == 0) return -1;
 
-        // 6. Write new snow
+        // Write new snow
         int writeY = groundY + 1;
-
         for (int i = 0; i < baseBlocks; i++) {
             Block b = world.getBlockAt(x, writeY + i, z);
-            if (b.getType() != Material.AIR
-                    && b.getType() != Material.SNOW
-                    && b.getType() != Material.SNOW_BLOCK) {
-                return isAdding ? 1 : -1;
-            }
+            if (b.getType() != Material.AIR && b.getType() != Material.SNOW
+                    && b.getType() != Material.SNOW_BLOCK) return isAdding ? 1 : -1;
             b.setType(Material.SNOW_BLOCK, false);
         }
 
         if (topLayers > 0) {
-            Block topSnow = world.getBlockAt(x, writeY + baseBlocks, z);
-            if (topSnow.getType() != Material.AIR && topSnow.getType() != Material.SNOW) {
+            Block top = world.getBlockAt(x, writeY + baseBlocks, z);
+            if (top.getType() != Material.AIR && top.getType() != Material.SNOW)
                 return isAdding ? 1 : -1;
-            }
-            topSnow.setType(Material.SNOW, false);
-            Snow sd = (Snow) topSnow.getBlockData();
+            top.setType(Material.SNOW, false);
+            Snow sd = (Snow) top.getBlockData();
             sd.setLayers(topLayers);
-            topSnow.setBlockData(sd, false);
+            top.setBlockData(sd, false);
         }
 
         return isAdding ? 1 : -1;
