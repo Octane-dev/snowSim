@@ -49,13 +49,10 @@ public class SnowSimCommand implements CommandExecutor {
             // Skip unloaded chunks (important)
             if (!world.isChunkLoaded(x >> 4, z >> 4)) continue;
 
-            int layers = UpdateSnowCommand.measureSnowLayers(
-                    world,
-                    x,
-                    z,
-                    scanFromY,
-                    UpdateSnowCommand.GROUND_BLOCKS
-            );
+            UpdateSnowCommand.SnowColumn col =
+                    UpdateSnowCommand.scanColumn(world, x, z, scanFromY);
+            
+            int layers = col.layers;
 
             samples.add(layers);
         }
