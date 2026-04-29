@@ -11,6 +11,11 @@ public class SnowDriftCommand implements CommandExecutor {
     private final SnowSim plugin;
     private final Random random = new Random();
 
+    // Leeward drift taper distance in blocks from fence
+    private static final int FENCE_DRIFT_REACH = 18;
+    // Max cm deposited right next to fence (tapers to 0 at FENCE_DRIFT_REACH)
+    private static final double FENCE_DRIFT_PEAK_CM = 150.0;
+
     public SnowDriftCommand(SnowSim plugin) {
         this.plugin = plugin;
     }
@@ -33,9 +38,7 @@ public class SnowDriftCommand implements CommandExecutor {
             return true;
         }
 
-        double windDeg;
-        double windStrength = 1.0;
-
+        double windDeg, windStrength = 1.0;
         try {
             windDeg = Double.parseDouble(args[0]) % 360;
             if (windDeg < 0) windDeg += 360;
@@ -43,7 +46,6 @@ public class SnowDriftCommand implements CommandExecutor {
             sender.sendMessage(ChatColor.RED + "Invalid wind direction: " + args[0]);
             return true;
         }
-
         if (args.length == 2) {
             try {
                 windStrength = Double.parseDouble(args[1]);
@@ -54,7 +56,6 @@ public class SnowDriftCommand implements CommandExecutor {
             }
         }
 
-        // Load config
         String worldName     = plugin.getConfig().getString("world", "world");
         int x1               = plugin.getConfig().getInt("bounding-box.x1", -22);
         int z1               = plugin.getConfig().getInt("bounding-box.z1", 301);
@@ -81,16 +82,18 @@ public class SnowDriftCommand implements CommandExecutor {
         int minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
         int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
 
-        // Wind direction in Minecraft XZ space
-        // Met convention: wind FROM degrees. 0=N, 90=E, 180=S, 270=W
-        // Minecraft: +X=east, +Z=south, -Z=north
-        // So upwind vector (direction we look for shelter) = direction wind is coming FROM
-        double windRad  = Math.toRadians(windDeg);
-        double upwindDX =  Math.sin(windRad);
-        double upwindDZ = -Math.cos(windRad);
+        // Met convention: wind FROM windDeg
+        // Upwind vector = direction we look for shelter (into the wind)
+        // Downwind vector = direction snow gets blown (away from wind source)
+        double windRad   = Math.toRadians(windDeg);
+        double upwindDX  =  Math.sin(windRad);
+        double upwindDZ  = -Math.cos(windRad);
+        // Downwind is the opposite direction
+        double downwindDX = -upwindDX;
+        double downwindDZ = -upwindDZ;
 
         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting drift pass...");
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Wind from " + windDeg + "° at strength " + windStrength);
+        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Wind from " + windDeg + "° strength " + windStrength);
         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Scan: " + scanDistance + " blocks  Fan: ±" + fanAngle
                 + "°  Max drift: " + maxDriftCm + "cm  Scour threshold: " + scourThreshCm + "cm");
         sender.sendMessage(ChatColor.GRAY + "Progress every 10%.");
@@ -98,6 +101,8 @@ public class SnowDriftCommand implements CommandExecutor {
         final double fWindStrength  = windStrength;
         final double fUpwindDX      = upwindDX;
         final double fUpwindDZ      = upwindDZ;
+        final double fDownwindDX    = downwindDX;
+        final double fDownwindDZ    = downwindDZ;
         final int    fScanFromY     = scanFromY;
         final int    fScanDistance  = scanDistance;
         final int    fFanAngle      = fanAngle;
@@ -120,15 +125,16 @@ public class SnowDriftCommand implements CommandExecutor {
                         this.cancel();
                         plugin.setDriftRunning(false);
                         sender.sendMessage(ChatColor.GREEN + "[SnowSim] Drift complete!"
-                                + "  Drifted: "  + String.format("%,d", drifted)
-                                + "  Scoured: "  + String.format("%,d", scoured)
+                                + "  Drifted: "   + String.format("%,d", drifted)
+                                + "  Scoured: "   + String.format("%,d", scoured)
                                 + "  Unchanged: " + String.format("%,d", unchanged));
                         return;
                     }
 
                     int result = processColumn(world, x, z, fScanFromY,
-                            fUpwindDX, fUpwindDZ, fScanDistance, fFanAngle,
-                            fWindStrength, fMaxDriftCm, fMaxScourCm, fScourThreshCm,
+                            fUpwindDX, fUpwindDZ, fDownwindDX, fDownwindDZ,
+                            fScanDistance, fFanAngle, fWindStrength,
+                            fMaxDriftCm, fMaxScourCm, fScourThreshCm,
                             fSnowVariance, fMeltVariance);
 
                     if      (result > 0) drifted++;
@@ -154,23 +160,42 @@ public class SnowDriftCommand implements CommandExecutor {
 
     private int processColumn(World world, int x, int z, int scanFromY,
                               double upwindDX, double upwindDZ,
-                              int scanDistance, int fanAngle,
-                              double windStrength,
+                              double downwindDX, double downwindDZ,
+                              int scanDistance, int fanAngle, double windStrength,
                               double maxDriftCm, double maxScourCm, double scourThreshCm,
                               int snowVariance, int meltVariance) {
 
-        // 1. Find TRUE terrain ground (no snow) for this column
+        // 1. Find true ground for this column (fences and water included)
         int groundY = SnowUtil.findGroundY(world, x, z, scanFromY);
         if (groundY == -1) return 0;
 
-        // 2. Measure current snow depth from ground up
         int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
 
-        // 3. Fan scan upwind using TERRAIN height only (no snow)
-        //    This prevents previously drifted snow from masquerading as terrain shelter
+        // 2. Check for fence leeward drift contribution
+        //    Look upwind — if we find an oak fence within FENCE_DRIFT_REACH blocks,
+        //    apply a tapered drift bonus based on distance from the fence.
+        double fenceDriftCm = 0;
+        for (int dist = 1; dist <= FENCE_DRIFT_REACH; dist++) {
+            int fx = (int) Math.round(x + upwindDX * dist);
+            int fz = (int) Math.round(z + upwindDZ * dist);
+
+            // Scan vertically for a fence at this XZ
+            int fenceCheckFromY = groundY + 10; // fences won't be far above ground
+            for (int fy = fenceCheckFromY; fy >= groundY - 2; fy--) {
+                if (world.getBlockAt(fx, fy, fz).getType() == Material.OAK_FENCE) {
+                    // Found a fence upwind — calculate tapered deposit
+                    // Cosine taper: peaks right next to fence, zero at FENCE_DRIFT_REACH
+                    double taper = Math.cos((dist / (double) FENCE_DRIFT_REACH) * (Math.PI / 2));
+                    fenceDriftCm = FENCE_DRIFT_PEAK_CM * taper * windStrength;
+                    break;
+                }
+            }
+            if (fenceDriftCm > 0) break; // only use nearest fence
+        }
+
+        // 3. Terrain shelter fan scan (upwind, terrain-only heights)
         double shelterScore = 0;
         int rayCount = 0;
-
         int fanSteps  = 7;
         int samplePts = Math.min(scanDistance, 20);
         double stepSize = scanDistance / (double) samplePts;
@@ -178,27 +203,21 @@ public class SnowDriftCommand implements CommandExecutor {
         for (int step = 0; step < fanSteps; step++) {
             double angleOffset = -fanAngle + (step * (2.0 * fanAngle / (fanSteps - 1)));
             double rayRad = Math.toRadians(angleOffset);
+            double rayDX  = upwindDX * Math.cos(rayRad) - upwindDZ * Math.sin(rayRad);
+            double rayDZ  = upwindDX * Math.sin(rayRad) + upwindDZ * Math.cos(rayRad);
 
-            // Rotate upwind vector
-            double rayDX = upwindDX * Math.cos(rayRad) - upwindDZ * Math.sin(rayRad);
-            double rayDZ = upwindDX * Math.sin(rayRad) + upwindDZ * Math.cos(rayRad);
-
-            double rayContrib   = 0;
-            double rayWeightSum = 0;
+            double rayContrib = 0, rayWeightSum = 0;
 
             for (int s = 1; s <= samplePts; s++) {
                 double dist = s * stepSize;
                 int sx = (int) Math.round(x + rayDX * dist);
                 int sz = (int) Math.round(z + rayDZ * dist);
 
-                // Use terrain-only height — ignores snow on upwind terrain
-                int upwindTerrainY = SnowUtil.findGroundY(world, sx, sz, scanFromY);
+                // Terrain-only — ignores snow and fences so they don't fake shelter
+                int upwindTerrainY = SnowUtil.findTerrainY(world, sx, sz, scanFromY);
                 if (upwindTerrainY == -1) continue;
 
-                // Height difference vs our terrain (not snow surface)
-                // Positive = upwind ground is higher = sheltered
                 int heightDiff = upwindTerrainY - groundY;
-
                 double distWeight = 1.0 / dist;
                 rayContrib   += heightDiff * distWeight;
                 rayWeightSum += distWeight;
@@ -210,28 +229,30 @@ public class SnowDriftCommand implements CommandExecutor {
             }
         }
 
-        if (rayCount == 0) return 0;
-        shelterScore /= rayCount;
+        if (rayCount == 0 && fenceDriftCm == 0) return 0;
+        if (rayCount > 0) shelterScore /= rayCount;
 
-        // 4. Map shelter score to drift modifier in cm
-        double driftModifierCm;
-
+        // 4. Map shelter score to terrain drift modifier
+        double terrainDriftCm = 0;
         if (shelterScore > 0) {
-            // Sheltered hollow — accumulate drift
             double fraction = Math.min(shelterScore / 20.0, 1.0);
-            driftModifierCm = fraction * maxDriftCm * windStrength;
-        } else {
-            // Exposed — only scour if snow is shallow
+            terrainDriftCm = fraction * maxDriftCm * windStrength;
+        } else if (shelterScore < 0) {
             double currentCm = SnowUtil.layersToCm(currentLayers);
-            if (currentCm >= scourThreshCm) return 0; // deep base, leave it alone
-            double fraction = Math.min(Math.abs(shelterScore) / 20.0, 1.0);
-            driftModifierCm = -fraction * maxScourCm * windStrength;
+            if (currentCm < scourThreshCm) {
+                double fraction = Math.min(Math.abs(shelterScore) / 20.0, 1.0);
+                terrainDriftCm = -fraction * maxScourCm * windStrength;
+            }
         }
 
-        // Skip if less than half a layer's worth
-        if (Math.abs(driftModifierCm) < 6.25) return 0;
+        // 5. Combine terrain drift and fence drift
+        //    Fence drift is always additive (leeward = always sheltered)
+        //    Terrain drift can be positive or negative
+        double totalDriftCm = terrainDriftCm + fenceDriftCm;
 
-        int deltaLayers = SnowUtil.cmToLayers(driftModifierCm);
+        if (Math.abs(totalDriftCm) < 6.25) return 0; // less than half a layer
+
+        int deltaLayers = SnowUtil.cmToLayers(totalDriftCm);
         if (deltaLayers == 0) return 0;
 
         int newLayers = Math.max(0, currentLayers + deltaLayers);
