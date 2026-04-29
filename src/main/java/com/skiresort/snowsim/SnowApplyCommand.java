@@ -179,14 +179,16 @@ public class SnowApplyCommand implements CommandExecutor {
             }
         }
 
-        // Clear old snow above ground
-        int oldBlocks    = currentLayers / 8;
-        int oldRemaining = currentLayers % 8;
-        int clearUpTo    = groundY + oldBlocks + (oldRemaining > 0 ? 1 : 0);
-        for (int y = groundY + 1; y <= clearUpTo; y++) {
+        // Clear all snow above ground by scanning upward until actual air.
+        // This handles cosmetic variance layers sitting higher than calculated depth,
+        // preventing remnant layer artefacts on scour passes.
+        for (int y = groundY + 1; y <= groundY + 200; y++) {
             Material mat = world.getBlockAt(x, y, z).getType();
-            if (mat == Material.SNOW_BLOCK || mat == Material.SNOW)
+            if (mat == Material.SNOW_BLOCK || mat == Material.SNOW) {
                 world.getBlockAt(x, y, z).setType(Material.AIR, false);
+            } else {
+                break; // hit air or non-snow, stop clearing
+            }
         }
 
         if (newLayers == 0) return -1;
