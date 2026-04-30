@@ -67,6 +67,7 @@ public class SnowDriftCommand implements CommandExecutor {
         double shelterNorm    = plugin.getConfig().getDouble("drift.shelter-normaliser", 8.0);
         int fenceReach        = plugin.getConfig().getInt("drift.fence-drift-reach", 18);
         double fencePeakCm    = plugin.getConfig().getDouble("drift.fence-drift-peak-cm", 150.0);
+        double slopeAngle     = plugin.getConfig().getDouble("drift.drift-slope-angle", 35.0);
         int snowVariance      = plugin.getConfig().getInt("cosmetic.snow-variance", 1);
         int meltVariance      = plugin.getConfig().getInt("cosmetic.melt-variance", 2);
 
@@ -105,6 +106,7 @@ public class SnowDriftCommand implements CommandExecutor {
         final double fShelterNorm   = shelterNorm;
         final int    fFenceReach    = fenceReach;
         final double fFencePeakCm   = fencePeakCm;
+        final double fSlopeAngle    = slopeAngle;
         final int    fSnowVariance  = snowVariance;
         final int    fMeltVariance  = meltVariance;
 
@@ -131,7 +133,7 @@ public class SnowDriftCommand implements CommandExecutor {
                             fUpwindDX, fUpwindDZ,
                             fScanDistance, fFanAngle, fWindStrength,
                             fMaxDriftCm, fMaxScourCm, fScourThreshCm, fShelterNorm,
-                            fFenceReach, fFencePeakCm,
+                            fFenceReach, fFencePeakCm, fSlopeAngle,
                             fSnowVariance, fMeltVariance);
 
                     if      (result > 0) drifted++;
@@ -157,32 +159,48 @@ public class SnowDriftCommand implements CommandExecutor {
 
     /**
      * Holds the result of the upwind fan scan:
-     * - shelterScore: weighted height difference (positive = sheltered)
-     * - weightedSurfaceY: weighted average of upwind SNOW surfaces (ground + snow)
-     *   Used as the height cap for leeward drift deposits.
+     * - shelterScore:       weighted height difference (positive = sheltered)
+     * - weightedSurfaceY:   weighted avg upwind SNOW surface Y (terrain + snow)
+     * - crestSurfaceY:      snow surface Y at the detected ridge crest
+     * - crestDistance:      XZ distance in blocks to the detected ridge crest
      */
     private static class FanResult {
         final double shelterScore;
-        final double weightedSurfaceY; // weighted avg upwind snow surface Y
-        FanResult(double shelterScore, double weightedSurfaceY) {
-            this.shelterScore = shelterScore;
-            this.weightedSurfaceY = weightedSurfaceY;
+        final double weightedSurfaceY;
+        final double crestSurfaceY;
+        final double crestDistance;
+        FanResult(double shelterScore, double weightedSurfaceY,
+                  double crestSurfaceY, double crestDistance) {
+            this.shelterScore      = shelterScore;
+            this.weightedSurfaceY  = weightedSurfaceY;
+            this.crestSurfaceY     = crestSurfaceY;
+            this.crestDistance     = crestDistance;
         }
     }
 
     /**
-     * Cast the upwind fan, returning both shelter score and weighted upwind surface Y.
-     * Shelter score uses terrain-only heights (so existing snow doesn't fake topography).
-     * Surface Y uses snow surface heights (ground + snow) — this is the drift cap.
+     * Cast the upwind fan.
+     * - Shelter score uses terrain-only heights.
+     * - weightedSurfaceY uses snow surfaces (for overall cap reference).
+     * - Crest = nearest upwind point where snow surface is >= 2 blocks above current ground.
+     *   The leeward slope taper originates from the crest snow surface Y and crest distance.
      */
     private FanResult fanScan(World world, int x, int groundY, int z,
                               double upwindDX, double upwindDZ,
                               int scanDistance, int fanAngle, int scanFromY) {
 
-        double shelterWeightedDiff  = 0;
-        double surfaceWeightedY     = 0;
-        double totalWeight          = 0;
-        int    rayCount             = 0;
+        double shelterWeightedDiff = 0;
+        double surfaceWeightedY    = 0;
+        double totalWeight         = 0;
+        int    rayCount            = 0;
+
+        // Crest detection — averaged across fan rays for smoothness
+        double crestSurfaceYSum  = 0;
+        double crestDistanceSum  = 0;
+        int    crestRayCount     = 0;
+
+        // Minimum height gain above current ground to count as a crest
+        final int CREST_THRESHOLD = 2;
 
         int fanSteps  = 7;
         int samplePts = Math.min(scanDistance, 20);
@@ -194,32 +212,37 @@ public class SnowDriftCommand implements CommandExecutor {
             double rayDX  = upwindDX * Math.cos(rayRad) - upwindDZ * Math.sin(rayRad);
             double rayDZ  = upwindDX * Math.sin(rayRad) + upwindDZ * Math.cos(rayRad);
 
-            double rayTerrainContrib  = 0;
-            double raySurfaceContrib  = 0;
-            double rayWeightSum       = 0;
+            double rayTerrainContrib = 0;
+            double raySurfaceContrib = 0;
+            double rayWeightSum      = 0;
+
+            // Track crest for this ray — nearest point >= CREST_THRESHOLD above groundY
+            double rayCrestSurfaceY  = -1;
+            double rayCrestDist      = -1;
 
             for (int s = 1; s <= samplePts; s++) {
                 double dist = s * stepSize;
                 int sx = (int) Math.round(x + rayDX * dist);
                 int sz = (int) Math.round(z + rayDZ * dist);
 
-                // Terrain-only for shelter score (no snow, no fences)
                 int upwindTerrainY = SnowUtil.findTerrainY(world, sx, sz, scanFromY);
                 if (upwindTerrainY == -1) continue;
 
-                // Snow surface for height cap (terrain + any snow on top)
-                int upwindGroundY  = SnowUtil.findGroundY(world, sx, sz, scanFromY);
+                int upwindGroundY    = SnowUtil.findGroundY(world, sx, sz, scanFromY);
                 int upwindSnowLayers = upwindGroundY != -1
                         ? SnowUtil.measureDepthAboveGround(world, sx, upwindGroundY, sz) : 0;
-                // Surface Y = terrain Y + snow depth in blocks (rounded)
                 double upwindSurfaceY = upwindTerrainY + (upwindSnowLayers / 8.0);
 
                 double distWeight = 1.0 / dist;
-                // Shelter score: height diff vs our bare terrain
                 rayTerrainContrib += (upwindTerrainY - groundY) * distWeight;
-                // Surface cap: weighted upwind snow surface Y
                 raySurfaceContrib += upwindSurfaceY * distWeight;
                 rayWeightSum      += distWeight;
+
+                // Crest detection — first point this ray encounters significant height gain
+                if (rayCrestDist < 0 && (upwindSurfaceY - groundY) >= CREST_THRESHOLD) {
+                    rayCrestSurfaceY = upwindSurfaceY;
+                    rayCrestDist     = dist;
+                }
             }
 
             if (rayWeightSum > 0) {
@@ -228,13 +251,26 @@ public class SnowDriftCommand implements CommandExecutor {
                 totalWeight         += 1.0;
                 rayCount++;
             }
+
+            if (rayCrestDist > 0) {
+                crestSurfaceYSum += rayCrestSurfaceY;
+                crestDistanceSum += rayCrestDist;
+                crestRayCount++;
+            }
         }
 
-        if (rayCount == 0) return new FanResult(0, groundY);
+        if (rayCount == 0) return new FanResult(0, groundY, groundY, 0);
+
+        double avgCrestSurfaceY = crestRayCount > 0
+                ? crestSurfaceYSum / crestRayCount : groundY;
+        double avgCrestDist     = crestRayCount > 0
+                ? crestDistanceSum / crestRayCount : 0;
 
         return new FanResult(
             shelterWeightedDiff / rayCount,
-            surfaceWeightedY    / totalWeight
+            surfaceWeightedY    / totalWeight,
+            avgCrestSurfaceY,
+            avgCrestDist
         );
     }
 
@@ -243,7 +279,7 @@ public class SnowDriftCommand implements CommandExecutor {
                               int scanDistance, int fanAngle, double windStrength,
                               double maxDriftCm, double maxScourCm, double scourThreshCm,
                               double shelterNorm,
-                              int fenceReach, double fencePeakCm,
+                              int fenceReach, double fencePeakCm, double slopeAngle,
                               int snowVariance, int meltVariance) {
 
         // 1. Find ground (includes fence tops and cappable water)
@@ -356,18 +392,39 @@ public class SnowDriftCommand implements CommandExecutor {
         int newLayers = Math.max(0, currentLayers + deltaLayers);
         if (newLayers == currentLayers) return 0;
 
-        // 7. Apply height cap — drift cannot exceed the weighted upwind snow surface
-        //    This uses snow surface (terrain + snow), so drifts migrate off existing drifts,
-        //    not the bare rock below them. Cap is the lower of terrain cap and fence cap.
-        double terrainCapY = fan.weightedSurfaceY;
-        double capY        = Math.min(terrainCapY, fenceCapY);
+        // 7. Apply tapered height cap based on leeward slope angle
+        //    The drift profile tapers from the crest outward at ~35 degrees.
+        //    capY at distance d from crest = crestSurfaceY - d * tan(slopeAngle)
+        //    This produces a natural ramp rather than a flat-topped block.
+
+        // Slope angle in degrees — controls how far the drift extends horizontally.
+        // 35 degrees = tan(35) ≈ 0.70 blocks drop per block of distance.
+        // Lower angle = gentler slope = drift extends further out.
+        final double SLOPE_TAN = Math.tan(Math.toRadians(slopeAngle));
+
+        // Terrain cap: crest snow surface Y minus slope drop for this column's distance
+        // crestDistance is how far upwind the crest is; this column is AT distance 0
+        // so total distance from crest to this column = crestDistance (we are leeward of it)
+        double terrainCapY;
+        if (fan.crestDistance > 0) {
+            // How far are we from the crest? We're at the column being processed,
+            // the crest was detected at fan.crestDistance blocks upwind.
+            // The slope drops from crest outward (downwind), so the cap at this column
+            // is crestSurfaceY minus the slope drop over crestDistance.
+            double slopeDrop = fan.crestDistance * SLOPE_TAN;
+            terrainCapY = fan.crestSurfaceY - slopeDrop;
+        } else {
+            // No crest detected — fall back to weighted surface Y
+            terrainCapY = fan.weightedSurfaceY;
+        }
+
+        double capY = Math.min(terrainCapY, fenceCapY);
 
         // Convert capY to max layers above this column's ground
-        // capY is in world Y units; our ground is at groundY
         double capHeightBlocks = capY - groundY;
         int maxLayersFromCap   = (int) Math.floor(capHeightBlocks * 8);
 
-        // Only apply cap when adding snow (never cap scour)
+        // Only cap when adding snow — never cap scour
         if (newLayers > currentLayers) {
             newLayers = Math.min(newLayers, Math.max(0, maxLayersFromCap));
         }
