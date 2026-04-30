@@ -480,10 +480,11 @@ public class SnowDriftCommand implements CommandExecutor {
         // Angle of repose for smoothing — snow won't pile steeper than this between neighbours.
         // 1 block horizontal distance, so max height diff = tan(repose) * 1 block ≈ 1.4 blocks
         // at 55 degrees. We use layers: 1 block = 8 layers, so threshold in layers.
-        int reposeLayersCfg  = plugin.getConfig().getInt("drift.smoothing-repose-layers", 5);
-        double fillFractionCfg = plugin.getConfig().getDouble("drift.smoothing-fill-fraction", 0.7);
-        final int    REPOSE_LAYERS  = reposeLayersCfg;
-        final double FILL_FRACTION  = fillFractionCfg;
+        final int REPOSE_LAYERS = 11; // ~1.4 blocks * 8 = 11 layers (~137cm)
+
+        // Smoothing fill fraction — how much of the height difference to fill per pass (0-1).
+        // 0.4 = fill 40% of the gap per pass, giving a gradual natural blend.
+        final double FILL_FRACTION = 0.4;
 
         int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
 
