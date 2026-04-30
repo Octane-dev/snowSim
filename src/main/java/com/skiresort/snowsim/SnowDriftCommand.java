@@ -121,11 +121,14 @@ public class SnowDriftCommand implements CommandExecutor {
                 while (done < colsPerTick) {
                     if (x > maxX) {
                         this.cancel();
-                        plugin.setDriftRunning(false);
-                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Drift complete!"
+                        // Phase 1 done — kick off phase 2 (neighbour smoothing fill)
+                        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Drift pass complete!"
                                 + "  Drifted: "   + String.format("%,d", drifted)
                                 + "  Scoured: "   + String.format("%,d", scoured)
                                 + "  Unchanged: " + String.format("%,d", unchanged));
+                        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass...");
+                        runSmoothingPass(world, minX, maxX, minZ, maxZ,
+                                fScanFromY, colsPerTick, fSnowVariance, fMeltVariance, sender);
                         return;
                     }
 
@@ -382,7 +385,25 @@ public class SnowDriftCommand implements CommandExecutor {
             }
         }
 
-        // 6. Combine terrain and fence drift
+        // 6. Scour neighbour override
+        //    If this column would be scoured but has a significantly deeper neighbour,
+        //    suppress the scour — the smoothing pass will fill it in instead.
+        if (terrainDriftCm < 0 && fenceDriftCm == 0) {
+            int[] ndx = {-1, 0, 1, -1, 1, -1, 0, 1};
+            int[] ndz = {-1, -1, -1, 0, 0, 1, 1, 1};
+            for (int ni = 0; ni < 8; ni++) {
+                int nGroundY = SnowUtil.findGroundY(world, x + ndx[ni], z + ndz[ni], scanFromY);
+                if (nGroundY == -1) continue;
+                int nLayers = SnowUtil.measureDepthAboveGround(
+                        world, x + ndx[ni], nGroundY, z + ndz[ni]);
+                // If neighbour has more than 16 layers (2 blocks = 200cm) more than us, skip scour
+                if (nLayers - currentLayers > 16) {
+                    return 0;
+                }
+            }
+        }
+
+        // Combine terrain and fence drift
         double totalDriftCm = terrainDriftCm + fenceDriftCm;
         if (Math.abs(totalDriftCm) < 6.25) return 0;
 
@@ -434,4 +455,109 @@ public class SnowDriftCommand implements CommandExecutor {
         return SnowApplyCommand.writeSnow(world, x, groundY, z,
                 currentLayers, newLayers, snowVariance, meltVariance, random);
     }
+    /**
+     * Phase 2 — Neighbour smoothing fill.
+     * For every column, look at all 8 neighbours. If any neighbour has significantly
+     * more snow, fill this column toward that neighbour proportionally.
+     * This smooths sharp drift edges and fills scoured patches next to deep deposits.
+     */
+    private void runSmoothingPass(World world, int minX, int maxX, int minZ, int maxZ,
+                                  int scanFromY, int colsPerTick,
+                                  int snowVariance, int meltVariance,
+                                  CommandSender sender) {
+
+        // Angle of repose for smoothing — snow won't pile steeper than this between neighbours.
+        // 1 block horizontal distance, so max height diff = tan(repose) * 1 block ≈ 1.4 blocks
+        // at 55 degrees. We use layers: 1 block = 8 layers, so threshold in layers.
+        final int REPOSE_LAYERS = 11; // ~1.4 blocks * 8 = 11 layers (~137cm)
+
+        // Smoothing fill fraction — how much of the height difference to fill per pass (0-1).
+        // 0.4 = fill 40% of the gap per pass, giving a gradual natural blend.
+        final double FILL_FRACTION = 0.4;
+
+        int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
+
+        new BukkitRunnable() {
+            int x = minX, z = minZ;
+            int processed = 0, filled = 0, unchanged = 0;
+            int lastPct = 0;
+
+            @Override
+            public void run() {
+                int done = 0;
+                while (done < colsPerTick) {
+                    if (x > maxX) {
+                        this.cancel();
+                        plugin.setDriftRunning(false);
+                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Smoothing complete!"
+                                + "  Filled: "    + String.format("%,d", filled)
+                                + "  Unchanged: " + String.format("%,d", unchanged));
+                        return;
+                    }
+
+                    int result = smoothColumn(world, x, z, scanFromY,
+                            REPOSE_LAYERS, FILL_FRACTION, snowVariance, meltVariance);
+                    if (result > 0) filled++;
+                    else            unchanged++;
+
+                    processed++; done++;
+                    z++;
+                    if (z > maxZ) { z = minZ; x++; }
+
+                    int pct = (int)((processed / (double)totalColumns) * 100);
+                    if (pct >= lastPct + 10) {
+                        lastPct = pct - (pct % 10);
+                        sender.sendMessage(ChatColor.GRAY + "[SnowSim] Smoothing " + lastPct + "% -- "
+                                + String.format("%,d", processed) + " / "
+                                + String.format("%,d", totalColumns));
+                    }
+                }
+            }
+        }.runTaskTimer(plugin, 2L, 1L);
+    }
+
+    /**
+     * Smooth a single column by filling toward deeper neighbours.
+     * Only ever adds snow — never removes. Scoured patches fill in naturally.
+     */
+    private int smoothColumn(World world, int x, int z, int scanFromY,
+                             int reposeLayersThreshold, double fillFraction,
+                             int snowVariance, int meltVariance) {
+
+        int groundY = SnowUtil.findGroundY(world, x, z, scanFromY);
+        if (groundY == -1) return 0;
+
+        int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
+
+        // Check all 8 neighbours for deeper snow
+        int maxNeighbourLayers = currentLayers;
+        int[] dx = {-1, 0, 1, -1, 1, -1, 0, 1};
+        int[] dz = {-1, -1, -1, 0, 0, 1, 1, 1};
+
+        for (int i = 0; i < 8; i++) {
+            int nx = x + dx[i];
+            int nz = z + dz[i];
+            int nGroundY = SnowUtil.findGroundY(world, nx, nz, scanFromY);
+            if (nGroundY == -1) continue;
+            int nLayers = SnowUtil.measureDepthAboveGround(world, nx, nGroundY, nz);
+            if (nLayers > maxNeighbourLayers) maxNeighbourLayers = nLayers;
+        }
+
+        // Height difference between deepest neighbour and this column
+        int diff = maxNeighbourLayers - currentLayers;
+
+        // Only fill if difference exceeds angle of repose threshold
+        if (diff <= reposeLayersThreshold) return 0;
+
+        // Fill a fraction of the excess above the repose threshold
+        int fillLayers = (int) Math.round((diff - reposeLayersThreshold) * fillFraction);
+        if (fillLayers <= 0) return 0;
+
+        int newLayers = currentLayers + fillLayers;
+
+        return SnowApplyCommand.writeSnow(world, x, groundY, z,
+                currentLayers, newLayers, snowVariance, meltVariance, random);
+    }
+
+
 }
