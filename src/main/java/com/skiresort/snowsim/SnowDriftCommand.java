@@ -70,6 +70,8 @@ public class SnowDriftCommand implements CommandExecutor {
         double slopeAngle     = plugin.getConfig().getDouble("drift.drift-slope-angle", 35.0);
         int snowVariance      = plugin.getConfig().getInt("cosmetic.snow-variance", 1);
         int meltVariance      = plugin.getConfig().getInt("cosmetic.melt-variance", 2);
+        int reposeLayers      = plugin.getConfig().getInt("drift.respose-layers", 11);
+        double fillFraction   = plugin.getConfig().getDouble("drift.fill-fraction", 0.4);
 
         World world = Bukkit.getWorld(worldName);
         if (world == null) {
@@ -109,6 +111,8 @@ public class SnowDriftCommand implements CommandExecutor {
         final double fSlopeAngle    = slopeAngle;
         final int    fSnowVariance  = snowVariance;
         final int    fMeltVariance  = meltVariance;
+        final int    fReposeLayers  = reposeLayers;
+        final double fFillFraction  = fillFraction;
 
         new BukkitRunnable() {
             int x = minX, z = minZ;
@@ -128,7 +132,7 @@ public class SnowDriftCommand implements CommandExecutor {
                                 + "  Unchanged: " + String.format("%,d", unchanged));
                         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass...");
                         runSmoothingPass(world, minX, maxX, minZ, maxZ,
-                                fScanFromY, colsPerTick, fSnowVariance, fMeltVariance, sender);
+                                fScanFromY, colsPerTick, fSnowVariance, fMeltVariance, fReposeLayers, fFillFraction, sender);
                         return;
                     }
 
@@ -464,16 +468,8 @@ public class SnowDriftCommand implements CommandExecutor {
     private void runSmoothingPass(World world, int minX, int maxX, int minZ, int maxZ,
                                   int scanFromY, int colsPerTick,
                                   int snowVariance, int meltVariance,
+                                  int REPOSE_LAYERS, double FILL_FRACTION,
                                   CommandSender sender) {
-
-        // Angle of repose for smoothing — snow won't pile steeper than this between neighbours.
-        // 1 block horizontal distance, so max height diff = tan(repose) * 1 block ≈ 1.4 blocks
-        // at 55 degrees. We use layers: 1 block = 8 layers, so threshold in layers.
-        final int REPOSE_LAYERS = 11; // ~1.4 blocks * 8 = 11 layers (~137cm)
-
-        // Smoothing fill fraction — how much of the height difference to fill per pass (0-1).
-        // 0.4 = fill 40% of the gap per pass, giving a gradual natural blend.
-        final double FILL_FRACTION = 0.4;
 
         int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
 
