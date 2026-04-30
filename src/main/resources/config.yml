@@ -59,6 +59,10 @@ drift:
   fence-drift-reach: 18
   # fence-drift-peak-cm: max drift depth right next to the fence (tapers to 0 at reach distance)
   fence-drift-peak-cm: 150.0
+  # drift-slope-angle: angle of the leeward drift face in degrees (30-40 is realistic).
+  # Lower = gentler slope = drift extends further horizontally.
+  # Higher = steeper wall = drift stays closer to the ridge.
+  drift-slope-angle: 35.0
 
 # Cosmetic variance — randomises the top partial snow layer for a natural look.
 # snow-variance: +/- layer range when adding snow.
