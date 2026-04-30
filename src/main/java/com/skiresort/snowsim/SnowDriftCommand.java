@@ -11,11 +11,6 @@ public class SnowDriftCommand implements CommandExecutor {
     private final SnowSim plugin;
     private final Random random = new Random();
 
-    // Leeward drift taper distance in blocks from fence
-    private static final int FENCE_DRIFT_REACH = 18;
-    // Max cm deposited right next to fence (tapers to 0 at FENCE_DRIFT_REACH)
-    private static final double FENCE_DRIFT_PEAK_CM = 150.0;
-
     public SnowDriftCommand(SnowSim plugin) {
         this.plugin = plugin;
     }
@@ -56,21 +51,27 @@ public class SnowDriftCommand implements CommandExecutor {
             }
         }
 
-        String worldName     = plugin.getConfig().getString("world", "world");
-        int x1               = plugin.getConfig().getInt("bounding-box.x1", -22);
-        int z1               = plugin.getConfig().getInt("bounding-box.z1", 301);
-        int x2               = plugin.getConfig().getInt("bounding-box.x2", 2451);
-        int z2               = plugin.getConfig().getInt("bounding-box.z2", -3047);
-        int scanFromY        = plugin.getConfig().getInt("scan-from-y", 700);
-        int colsPerTick      = plugin.getConfig().getInt("drift.columns-per-tick",
-                                   plugin.getConfig().getInt("columns-per-tick", 300));
-        int scanDistance     = plugin.getConfig().getInt("drift.scan-distance", 80);
-        int fanAngle         = plugin.getConfig().getInt("drift.fan-angle", 30);
-        double maxDriftCm    = plugin.getConfig().getDouble("drift.max-drift-cm", 600.0);
-        double maxScourCm    = plugin.getConfig().getDouble("drift.max-scour-cm", 40.0);
-        double scourThreshCm = plugin.getConfig().getDouble("drift.scour-threshold-cm", 50.0);
-        int snowVariance     = plugin.getConfig().getInt("cosmetic.snow-variance", 1);
-        int meltVariance     = plugin.getConfig().getInt("cosmetic.melt-variance", 2);
+        String worldName      = plugin.getConfig().getString("world", "world");
+        int x1                = plugin.getConfig().getInt("bounding-box.x1", -22);
+        int z1                = plugin.getConfig().getInt("bounding-box.z1", 301);
+        int x2                = plugin.getConfig().getInt("bounding-box.x2", 2451);
+        int z2                = plugin.getConfig().getInt("bounding-box.z2", -3047);
+        int scanFromY         = plugin.getConfig().getInt("scan-from-y", 700);
+        int colsPerTick       = plugin.getConfig().getInt("drift.columns-per-tick",
+                                    plugin.getConfig().getInt("columns-per-tick", 300));
+        int scanDistance      = plugin.getConfig().getInt("drift.scan-distance", 80);
+        int fanAngle          = plugin.getConfig().getInt("drift.fan-angle", 40);
+        double maxDriftCm     = plugin.getConfig().getDouble("drift.max-drift-cm", 600.0);
+        double maxScourCm     = plugin.getConfig().getDouble("drift.max-scour-cm", 40.0);
+        double scourThreshCm  = plugin.getConfig().getDouble("drift.scour-threshold-cm", 50.0);
+        // shelter-normaliser: the shelter score value that maps to 100% drift effect.
+        // Lower = more sensitive (smaller ridges trigger full drift).
+        // Based on your terrain: ridges ~15-25 blocks high, set to 8 so they register strongly.
+        double shelterNorm    = plugin.getConfig().getDouble("drift.shelter-normaliser", 8.0);
+        int fenceDriftReach   = plugin.getConfig().getInt("drift.fence-drift-reach", 18);
+        double fenceDriftPeak = plugin.getConfig().getDouble("drift.fence-drift-peak-cm", 150.0);
+        int snowVariance      = plugin.getConfig().getInt("cosmetic.snow-variance", 1);
+        int meltVariance      = plugin.getConfig().getInt("cosmetic.melt-variance", 2);
 
         World world = Bukkit.getWorld(worldName);
         if (world == null) {
@@ -82,35 +83,33 @@ public class SnowDriftCommand implements CommandExecutor {
         int minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
         int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
 
-        // Met convention: wind FROM windDeg
-        // Upwind vector = direction we look for shelter (into the wind)
-        // Downwind vector = direction snow gets blown (away from wind source)
-        double windRad   = Math.toRadians(windDeg);
-        double upwindDX  =  Math.sin(windRad);
-        double upwindDZ  = -Math.cos(windRad);
-        // Downwind is the opposite direction
-        double downwindDX = -upwindDX;
-        double downwindDZ = -upwindDZ;
+        double windRad    = Math.toRadians(windDeg);
+        double upwindDX   =  Math.sin(windRad);
+        double upwindDZ   = -Math.cos(windRad);
 
         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting drift pass...");
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Wind from " + windDeg + "° strength " + windStrength);
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Scan: " + scanDistance + " blocks  Fan: ±" + fanAngle
-                + "°  Max drift: " + maxDriftCm + "cm  Scour threshold: " + scourThreshCm + "cm");
+        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Wind from " + windDeg
+                + "° strength " + windStrength
+                + "  shelter-normaliser: " + shelterNorm);
+        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Scan: " + scanDistance
+                + " blocks  Fan: ±" + fanAngle
+                + "°  Max drift: " + maxDriftCm + "cm");
         sender.sendMessage(ChatColor.GRAY + "Progress every 10%.");
 
-        final double fWindStrength  = windStrength;
-        final double fUpwindDX      = upwindDX;
-        final double fUpwindDZ      = upwindDZ;
-        final double fDownwindDX    = downwindDX;
-        final double fDownwindDZ    = downwindDZ;
-        final int    fScanFromY     = scanFromY;
-        final int    fScanDistance  = scanDistance;
-        final int    fFanAngle      = fanAngle;
-        final double fMaxDriftCm    = maxDriftCm;
-        final double fMaxScourCm    = maxScourCm;
-        final double fScourThreshCm = scourThreshCm;
-        final int    fSnowVariance  = snowVariance;
-        final int    fMeltVariance  = meltVariance;
+        final double fWindStrength   = windStrength;
+        final double fUpwindDX       = upwindDX;
+        final double fUpwindDZ       = upwindDZ;
+        final int    fScanFromY      = scanFromY;
+        final int    fScanDistance   = scanDistance;
+        final int    fFanAngle       = fanAngle;
+        final double fMaxDriftCm     = maxDriftCm;
+        final double fMaxScourCm     = maxScourCm;
+        final double fScourThreshCm  = scourThreshCm;
+        final double fShelterNorm    = shelterNorm;
+        final int    fFenceReach     = fenceDriftReach;
+        final double fFencePeak      = fenceDriftPeak;
+        final int    fSnowVariance   = snowVariance;
+        final int    fMeltVariance   = meltVariance;
 
         new BukkitRunnable() {
             int x = minX, z = minZ;
@@ -132,9 +131,10 @@ public class SnowDriftCommand implements CommandExecutor {
                     }
 
                     int result = processColumn(world, x, z, fScanFromY,
-                            fUpwindDX, fUpwindDZ, fDownwindDX, fDownwindDZ,
+                            fUpwindDX, fUpwindDZ,
                             fScanDistance, fFanAngle, fWindStrength,
-                            fMaxDriftCm, fMaxScourCm, fScourThreshCm,
+                            fMaxDriftCm, fMaxScourCm, fScourThreshCm, fShelterNorm,
+                            fFenceReach, fFencePeak,
                             fSnowVariance, fMeltVariance);
 
                     if      (result > 0) drifted++;
@@ -160,42 +160,93 @@ public class SnowDriftCommand implements CommandExecutor {
 
     private int processColumn(World world, int x, int z, int scanFromY,
                               double upwindDX, double upwindDZ,
-                              double downwindDX, double downwindDZ,
                               int scanDistance, int fanAngle, double windStrength,
                               double maxDriftCm, double maxScourCm, double scourThreshCm,
+                              double shelterNorm,
+                              int fenceReach, double fencePeakCm,
                               int snowVariance, int meltVariance) {
 
-        // 1. Find true ground for this column (fences and water included)
+        // 1. Find true ground (includes fence tops and cappable water)
         int groundY = SnowUtil.findGroundY(world, x, z, scanFromY);
         if (groundY == -1) return 0;
 
         int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
+        double currentCm  = SnowUtil.layersToCm(currentLayers);
 
-        // 2. Check for fence leeward drift contribution
-        //    Look upwind — if we find an oak fence within FENCE_DRIFT_REACH blocks,
-        //    apply a tapered drift bonus based on distance from the fence.
+        // 2. Fence leeward drift
+        //    - Only deposit if this column is not itself a fence
+        //    - Check if the fence upwind is buried (snow depth >= fence height ~1.5m=150cm)
+        //      If buried, treat as flat terrain — no drift bonus
         double fenceDriftCm = 0;
-        for (int dist = 1; dist <= FENCE_DRIFT_REACH; dist++) {
-            int fx = (int) Math.round(x + upwindDX * dist);
-            int fz = (int) Math.round(z + upwindDZ * dist);
+        Material thisBlock = world.getBlockAt(x, groundY, z).getType();
+        boolean thisIsFence = thisBlock == Material.OAK_FENCE;
 
-            // Scan vertically for a fence at this XZ
-            int fenceCheckFromY = groundY + 10; // fences won't be far above ground
-            for (int fy = fenceCheckFromY; fy >= groundY - 2; fy--) {
-                if (world.getBlockAt(fx, fy, fz).getType() == Material.OAK_FENCE) {
-                    // Found a fence upwind — calculate tapered deposit
-                    // Cosine taper: peaks right next to fence, zero at FENCE_DRIFT_REACH
-                    double taper = Math.cos((dist / (double) FENCE_DRIFT_REACH) * (Math.PI / 2));
-                    fenceDriftCm = FENCE_DRIFT_PEAK_CM * taper * windStrength;
-                    break;
+        if (!thisIsFence) {
+            for (int dist = 1; dist <= fenceReach; dist++) {
+                int fx = (int) Math.round(x + upwindDX * dist);
+                int fz = (int) Math.round(z + upwindDZ * dist);
+
+                for (int fy = groundY + 10; fy >= groundY - 2; fy--) {
+                    if (world.getBlockAt(fx, fy, fz).getType() == Material.OAK_FENCE) {
+                        // Measure actual fence height by counting contiguous fence blocks upward
+                        int fenceHeightBlocks = 0;
+                        for (int fh = fy; world.getBlockAt(fx, fh, fz).getType() == Material.OAK_FENCE; fh++) {
+                            fenceHeightBlocks++;
+                        }
+                        double fenceHeightCm = fenceHeightBlocks * 100.0;
+
+                        // Check if fence is buried — snow depth at fence column vs actual fence height
+                        int fenceGroundY = SnowUtil.findTerrainY(world, fx, fz, scanFromY);
+                        if (fenceGroundY != -1) {
+                            int fenceSnowLayers = SnowUtil.measureDepthAboveGround(world, fx, fenceGroundY, fz);
+                            double fenceSnowCm  = SnowUtil.layersToCm(fenceSnowLayers);
+                            // If snow depth >= fence height, fence is buried — no drift
+                            if (fenceSnowCm >= fenceHeightCm) break;
+
+                            // Fence is active — apply tapered leeward deposit
+                            double taper = Math.cos((dist / (double) fenceReach) * (Math.PI / 2));
+                            fenceDriftCm = fencePeakCm * taper * windStrength;
+                        }
+                        break;
+                    }
                 }
+                if (fenceDriftCm > 0) break;
             }
-            if (fenceDriftCm > 0) break; // only use nearest fence
         }
 
-        // 3. Terrain shelter fan scan (upwind, terrain-only heights)
+        // 3. Fence top snow — only settle on fence if surrounding ground snow is
+        //    deep enough to reach it (fence top is ~1 block above ground = 100cm)
+        if (thisIsFence) {
+            // Check average snow depth in a 3-block radius around the fence
+            int surroundLayers = 0, surroundCount = 0;
+            for (int dx = -3; dx <= 3; dx++) {
+                for (int dz = -3; dz <= 3; dz++) {
+                    if (dx == 0 && dz == 0) continue;
+                    int nearGround = SnowUtil.findGroundY(world, x + dx, z + dz, scanFromY);
+                    if (nearGround != -1 && !SnowUtil.FENCE_BLOCKS.contains(
+                            world.getBlockAt(x + dx, z + dz, nearGround).getType())) {
+                        surroundLayers += SnowUtil.measureDepthAboveGround(world, x + dx, nearGround, z + dz);
+                        surroundCount++;
+                    }
+                }
+            }
+            double avgSurroundCm = surroundCount > 0
+                    ? SnowUtil.layersToCm(surroundLayers / surroundCount) : 0;
+
+            // Measure this fence's actual height
+            int thisFenceHeight = 0;
+            for (int fh = groundY; world.getBlockAt(x, fh, z).getType() == Material.OAK_FENCE; fh++) {
+                thisFenceHeight++;
+            }
+            double thisFenceHeightCm = thisFenceHeight * 100.0;
+
+            // Snow can only settle on fence top once surrounding snow reaches fence height
+            if (avgSurroundCm < thisFenceHeightCm) return 0;
+        }
+
+        // 4. Terrain shelter fan scan — terrain-only heights, no snow, no fences
         double shelterScore = 0;
-        int rayCount = 0;
+        int rayCount  = 0;
         int fanSteps  = 7;
         int samplePts = Math.min(scanDistance, 20);
         double stepSize = scanDistance / (double) samplePts;
@@ -213,11 +264,13 @@ public class SnowDriftCommand implements CommandExecutor {
                 int sx = (int) Math.round(x + rayDX * dist);
                 int sz = (int) Math.round(z + rayDZ * dist);
 
-                // Terrain-only — ignores snow and fences so they don't fake shelter
                 int upwindTerrainY = SnowUtil.findTerrainY(world, sx, sz, scanFromY);
                 if (upwindTerrainY == -1) continue;
 
+                // Height difference vs our terrain — positive = sheltered
                 int heightDiff = upwindTerrainY - groundY;
+
+                // Inverse distance weight — closer terrain shelters more
                 double distWeight = 1.0 / dist;
                 rayContrib   += heightDiff * distWeight;
                 rayWeightSum += distWeight;
@@ -232,25 +285,27 @@ public class SnowDriftCommand implements CommandExecutor {
         if (rayCount == 0 && fenceDriftCm == 0) return 0;
         if (rayCount > 0) shelterScore /= rayCount;
 
-        // 4. Map shelter score to terrain drift modifier
+        // 5. Map shelter score to drift modifier
+        //    shelterNorm is the score that equals 100% effect — calibrated to terrain scale
         double terrainDriftCm = 0;
         if (shelterScore > 0) {
-            double fraction = Math.min(shelterScore / 20.0, 1.0);
+            // Sheltered — sigmoid-style curve so moderate shelter still gets significant drift
+            double fraction = Math.min(shelterScore / shelterNorm, 1.0);
+            // Apply a mild curve so small shelter gets some drift, not a cliff edge
+            fraction = Math.sqrt(fraction);
             terrainDriftCm = fraction * maxDriftCm * windStrength;
         } else if (shelterScore < 0) {
-            double currentCm = SnowUtil.layersToCm(currentLayers);
+            // Exposed — only scour shallow snow
             if (currentCm < scourThreshCm) {
-                double fraction = Math.min(Math.abs(shelterScore) / 20.0, 1.0);
+                double fraction = Math.min(Math.abs(shelterScore) / shelterNorm, 1.0);
+                fraction = Math.sqrt(fraction);
                 terrainDriftCm = -fraction * maxScourCm * windStrength;
             }
         }
 
-        // 5. Combine terrain drift and fence drift
-        //    Fence drift is always additive (leeward = always sheltered)
-        //    Terrain drift can be positive or negative
+        // 6. Combine terrain and fence drift
         double totalDriftCm = terrainDriftCm + fenceDriftCm;
-
-        if (Math.abs(totalDriftCm) < 6.25) return 0; // less than half a layer
+        if (Math.abs(totalDriftCm) < 6.25) return 0;
 
         int deltaLayers = SnowUtil.cmToLayers(totalDriftCm);
         if (deltaLayers == 0) return 0;
