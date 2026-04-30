@@ -70,8 +70,6 @@ public class SnowDriftCommand implements CommandExecutor {
         double slopeAngle     = plugin.getConfig().getDouble("drift.drift-slope-angle", 35.0);
         int snowVariance      = plugin.getConfig().getInt("cosmetic.snow-variance", 1);
         int meltVariance      = plugin.getConfig().getInt("cosmetic.melt-variance", 2);
-        int reposeLayers      = plugin.getConfig().getInt("drift.respose-layers", 11);
-        double fillFraction   = plugin.getConfig().getDouble("drift.fill-fraction", 0.4);
 
         World world = Bukkit.getWorld(worldName);
         if (world == null) {
@@ -111,8 +109,6 @@ public class SnowDriftCommand implements CommandExecutor {
         final double fSlopeAngle    = slopeAngle;
         final int    fSnowVariance  = snowVariance;
         final int    fMeltVariance  = meltVariance;
-        final int    fReposeLayers  = reposeLayers;
-        final double fFillFraction  = fillFraction;
 
         new BukkitRunnable() {
             int x = minX, z = minZ;
@@ -132,7 +128,7 @@ public class SnowDriftCommand implements CommandExecutor {
                                 + "  Unchanged: " + String.format("%,d", unchanged));
                         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass...");
                         runSmoothingPass(world, minX, maxX, minZ, maxZ,
-                                fScanFromY, colsPerTick, fSnowVariance, fMeltVariance, fReposeLayers, fFillFraction, sender);
+                                fScanFromY, colsPerTick, fSnowVariance, fMeltVariance, sender);
                         return;
                     }
 
@@ -295,6 +291,17 @@ public class SnowDriftCommand implements CommandExecutor {
 
         int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
         double currentCm  = SnowUtil.layersToCm(currentLayers);
+
+        // Building edge guard — check immediate 3x3 neighbours for large ground Y drops.
+        // If any neighbour's ground is >10 blocks different, this is a building/cliff edge.
+        // Skip drift placement entirely to avoid mega artifacts.
+        for (int ex = -1; ex <= 1; ex++) {
+            for (int ez = -1; ez <= 1; ez++) {
+                if (ex == 0 && ez == 0) continue;
+                int eGroundY = SnowUtil.findGroundY(world, x + ex, z + ez, scanFromY);
+                if (eGroundY != -1 && Math.abs(eGroundY - groundY) > 10) return 0;
+            }
+        }
 
         // 2. Fence leeward drift
         double fenceDriftCm  = 0;
@@ -468,8 +475,15 @@ public class SnowDriftCommand implements CommandExecutor {
     private void runSmoothingPass(World world, int minX, int maxX, int minZ, int maxZ,
                                   int scanFromY, int colsPerTick,
                                   int snowVariance, int meltVariance,
-                                  int REPOSE_LAYERS, double FILL_FRACTION,
                                   CommandSender sender) {
+
+        // Angle of repose for smoothing — snow won't pile steeper than this between neighbours.
+        // 1 block horizontal distance, so max height diff = tan(repose) * 1 block ≈ 1.4 blocks
+        // at 55 degrees. We use layers: 1 block = 8 layers, so threshold in layers.
+        int reposeLayersCfg  = plugin.getConfig().getInt("drift.smoothing-repose-layers", 5);
+        double fillFractionCfg = plugin.getConfig().getDouble("drift.smoothing-fill-fraction", 0.7);
+        final int    REPOSE_LAYERS  = reposeLayersCfg;
+        final double FILL_FRACTION  = fillFractionCfg;
 
         int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
 
@@ -514,7 +528,11 @@ public class SnowDriftCommand implements CommandExecutor {
 
     /**
      * Smooth a single column by filling toward deeper neighbours.
-     * Only ever adds snow — never removes. Scoured patches fill in naturally.
+     * Searches a 5x5 radius for the deepest nearby snow — allows fills to
+     * propagate across wide gullies rather than just immediate neighbours.
+     * Also guards against building edge artifacts by skipping columns where
+     * ground Y differs too much from neighbours (building edges).
+     * Only ever adds snow — never removes.
      */
     private int smoothColumn(World world, int x, int z, int scanFromY,
                              int reposeLayersThreshold, double fillFraction,
@@ -525,27 +543,34 @@ public class SnowDriftCommand implements CommandExecutor {
 
         int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
 
-        // Check all 8 neighbours for deeper snow
+        // 5x5 radius search for deepest neighbour snow
+        // Also track max ground Y difference to detect building edges
         int maxNeighbourLayers = currentLayers;
-        int[] dx = {-1, 0, 1, -1, 1, -1, 0, 1};
-        int[] dz = {-1, -1, -1, 0, 0, 1, 1, 1};
+        int maxGroundYDiff     = 0;
 
-        for (int i = 0; i < 8; i++) {
-            int nx = x + dx[i];
-            int nz = z + dz[i];
-            int nGroundY = SnowUtil.findGroundY(world, nx, nz, scanFromY);
-            if (nGroundY == -1) continue;
-            int nLayers = SnowUtil.measureDepthAboveGround(world, nx, nGroundY, nz);
-            if (nLayers > maxNeighbourLayers) maxNeighbourLayers = nLayers;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                int nx = x + dx, nz = z + dz;
+                int nGroundY = SnowUtil.findGroundY(world, nx, nz, scanFromY);
+                if (nGroundY == -1) continue;
+
+                // Track ground Y difference — large diff = building edge
+                int groundDiff = Math.abs(nGroundY - groundY);
+                if (groundDiff > maxGroundYDiff) maxGroundYDiff = groundDiff;
+
+                int nLayers = SnowUtil.measureDepthAboveGround(world, nx, nGroundY, nz);
+                if (nLayers > maxNeighbourLayers) maxNeighbourLayers = nLayers;
+            }
         }
 
-        // Height difference between deepest neighbour and this column
-        int diff = maxNeighbourLayers - currentLayers;
+        // Building edge guard — if ground drops >10 blocks to any neighbour within 5x5,
+        // this is likely a building/cliff edge. Skip to avoid mega artifacts.
+        if (maxGroundYDiff > 10) return 0;
 
-        // Only fill if difference exceeds angle of repose threshold
+        int diff = maxNeighbourLayers - currentLayers;
         if (diff <= reposeLayersThreshold) return 0;
 
-        // Fill a fraction of the excess above the repose threshold
         int fillLayers = (int) Math.round((diff - reposeLayersThreshold) * fillFraction);
         if (fillLayers <= 0) return 0;
 
