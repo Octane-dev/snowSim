@@ -126,9 +126,11 @@ public class SnowDriftCommand implements CommandExecutor {
                                 + "  Drifted: "   + String.format("%,d", drifted)
                                 + "  Scoured: "   + String.format("%,d", scoured)
                                 + "  Unchanged: " + String.format("%,d", unchanged));
-                        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass...");
+                        int totalIters = plugin.getConfig().getInt("drift.smoothing-iterations", 3);
+                        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass (1/" + totalIters + ")...");
                         runSmoothingPass(world, minX, maxX, minZ, maxZ,
-                                fScanFromY, colsPerTick, fSnowVariance, fMeltVariance, sender);
+                                fScanFromY, colsPerTick, fSnowVariance, fMeltVariance,
+                                1, totalIters, sender);
                         return;
                     }
 
@@ -397,9 +399,14 @@ public class SnowDriftCommand implements CommandExecutor {
         }
 
         // 6. Scour neighbour override
-        //    If this column would be scoured but has a significantly deeper neighbour,
-        //    suppress the scour — the smoothing pass will fill it in instead.
+        //    If this column would be scoured, check if any neighbour has a significantly
+        //    higher SNOW SURFACE (ground + snow depth). A deep drift wall next to this
+        //    column physically blocks the wind regardless of terrain slope direction —
+        //    so we compare snow surfaces, not ground Y.
         if (terrainDriftCm < 0 && fenceDriftCm == 0) {
+            // This column's snow surface Y
+            double thisSurfaceY = groundY + (currentLayers / 8.0);
+
             int[] ndx = {-1, 0, 1, -1, 1, -1, 0, 1};
             int[] ndz = {-1, -1, -1, 0, 0, 1, 1, 1};
             for (int ni = 0; ni < 8; ni++) {
@@ -407,8 +414,10 @@ public class SnowDriftCommand implements CommandExecutor {
                 if (nGroundY == -1) continue;
                 int nLayers = SnowUtil.measureDepthAboveGround(
                         world, x + ndx[ni], nGroundY, z + ndz[ni]);
-                // If neighbour has more than 16 layers (2 blocks = 200cm) more than us, skip scour
-                if (nLayers - currentLayers > 16) {
+                double nSurfaceY = nGroundY + (nLayers / 8.0);
+                // If neighbour snow surface is more than 2 blocks above this column's
+                // snow surface, the drift wall is sheltering this column — suppress scour
+                if (nSurfaceY - thisSurfaceY > 2.0) {
                     return 0;
                 }
             }
@@ -475,17 +484,11 @@ public class SnowDriftCommand implements CommandExecutor {
     private void runSmoothingPass(World world, int minX, int maxX, int minZ, int maxZ,
                                   int scanFromY, int colsPerTick,
                                   int snowVariance, int meltVariance,
+                                  int currentIter, int totalIters,
                                   CommandSender sender) {
 
-        // Angle of repose for smoothing — snow won't pile steeper than this between neighbours.
-        // 1 block horizontal distance, so max height diff = tan(repose) * 1 block ≈ 1.4 blocks
-        // at 55 degrees. We use layers: 1 block = 8 layers, so threshold in layers.
-        final int REPOSE_LAYERS = 11; // ~1.4 blocks * 8 = 11 layers (~137cm)
-
-        // Smoothing fill fraction — how much of the height difference to fill per pass (0-1).
-        // 0.4 = fill 40% of the gap per pass, giving a gradual natural blend.
-        final double FILL_FRACTION = 0.4;
-
+        final int    REPOSE_LAYERS = plugin.getConfig().getInt("drift.smoothing-repose-layers", 5);
+        final double FILL_FRACTION = plugin.getConfig().getDouble("drift.smoothing-fill-fraction", 0.7);
         int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
 
         new BukkitRunnable() {
@@ -499,10 +502,21 @@ public class SnowDriftCommand implements CommandExecutor {
                 while (done < colsPerTick) {
                     if (x > maxX) {
                         this.cancel();
-                        plugin.setDriftRunning(false);
-                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Smoothing complete!"
-                                + "  Filled: "    + String.format("%,d", filled)
-                                + "  Unchanged: " + String.format("%,d", unchanged));
+                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Smoothing pass " + currentIter + "/" + totalIters
+                                + " complete!  Filled: " + String.format("%,d", filled)
+                                + "  Unchanged: "        + String.format("%,d", unchanged));
+
+                        if (currentIter < totalIters) {
+                            // Chain next smoothing iteration
+                            sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass ("
+                                    + (currentIter + 1) + "/" + totalIters + ")...");
+                            runSmoothingPass(world, minX, maxX, minZ, maxZ,
+                                    scanFromY, colsPerTick, snowVariance, meltVariance,
+                                    currentIter + 1, totalIters, sender);
+                        } else {
+                            plugin.setDriftRunning(false);
+                            sender.sendMessage(ChatColor.GREEN + "[SnowSim] All smoothing passes done.");
+                        }
                         return;
                     }
 
@@ -561,6 +575,17 @@ public class SnowDriftCommand implements CommandExecutor {
                 if (groundDiff > maxGroundYDiff) maxGroundYDiff = groundDiff;
 
                 int nLayers = SnowUtil.measureDepthAboveGround(world, nx, nGroundY, nz);
+
+                // Compare snow SURFACES (ground + snow), not bare ground.
+                // A deep drift wall on flat or lower ground should still fill into
+                // an adjacent hollow — the surface height is what matters physically.
+                double nSurfaceY    = nGroundY + (nLayers / 8.0);
+                double thisSurfaceY = groundY  + (currentLayers / 8.0);
+
+                // Only fill if neighbour snow surface is higher than ours
+                // This prevents snow being pushed uphill where the surface is already higher
+                if (nSurfaceY <= thisSurfaceY) continue;
+
                 if (nLayers > maxNeighbourLayers) maxNeighbourLayers = nLayers;
             }
         }
