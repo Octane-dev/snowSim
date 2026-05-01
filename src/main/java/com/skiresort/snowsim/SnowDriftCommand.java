@@ -126,11 +126,14 @@ public class SnowDriftCommand implements CommandExecutor {
                                 + "  Drifted: "   + String.format("%,d", drifted)
                                 + "  Scoured: "   + String.format("%,d", scoured)
                                 + "  Unchanged: " + String.format("%,d", unchanged));
-                        int totalIters = plugin.getConfig().getInt("drift.smoothing-iterations", 3);
-                        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass (1/" + totalIters + ")...");
-                        runSmoothingPass(world, minX, maxX, minZ, maxZ,
-                                fScanFromY, colsPerTick, fSnowVariance, fMeltVariance,
-                                1, totalIters, sender);
+                        // Smoothing pass temporarily disabled
+                        // int totalIters = plugin.getConfig().getInt("drift.smoothing-iterations", 3);
+                        // sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass (1/" + totalIters + ")...");
+                        // runSmoothingPass(world, minX, maxX, minZ, maxZ,
+                        //         fScanFromY, colsPerTick, fSnowVariance, fMeltVariance,
+                        //         1, totalIters, sender);
+                        plugin.setDriftRunning(false);
+                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Drift complete!");
                         return;
                     }
 
@@ -184,82 +187,99 @@ public class SnowDriftCommand implements CommandExecutor {
     }
 
     /**
-     * Cast the upwind fan.
-     * - Shelter score uses terrain-only heights.
-     * - weightedSurfaceY uses snow surfaces (for overall cap reference).
-     * - Crest = nearest upwind point where snow surface is >= 2 blocks above current ground.
-     *   The leeward slope taper originates from the crest snow surface Y and crest distance.
+     * Context-aware omni-directional shelter scan.
+     *
+     * Casts rays in all directions (360°), not just upwind.
+     * Each ray contributes to a composite shelter score weighted by:
+     *   - Directional alignment: upwind rays count fully, downwind rays count at
+     *     reduced weight (wind_bias). This means existing downwind drifts can
+     *     shelter a column — the drift feeds back into itself.
+     *   - Snow surface height (terrain + snow), not bare terrain only.
+     *     Growing drifts become part of the shelter landscape.
+     *   - Inverse distance: closer features shelter more.
+     *
+     * Crest detection finds the nearest significant height gain across all rays
+     * (biased upwind) for the slope taper cap.
      */
     private FanResult fanScan(World world, int x, int groundY, int z,
                               double upwindDX, double upwindDZ,
                               int scanDistance, int fanAngle, int scanFromY) {
 
-        double shelterWeightedDiff = 0;
-        double surfaceWeightedY    = 0;
-        double totalWeight         = 0;
-        int    rayCount            = 0;
+        // How many rays to cast total across 360 degrees
+        final int TOTAL_RAYS  = 16;
+        // Weight applied to downwind rays vs upwind rays (0=ignore downwind, 1=equal weight)
+        // 0.35 means downwind shelter counts for 35% — enough for drift feedback without
+        // removing wind directionality entirely
+        final double DOWNWIND_BIAS = 0.35;
+        final int CREST_THRESHOLD  = 2;
 
-        // Crest detection — averaged across fan rays for smoothness
-        double crestSurfaceYSum  = 0;
-        double crestDistanceSum  = 0;
-        int    crestRayCount     = 0;
+        double shelterSum    = 0;
+        double surfaceYSum   = 0;
+        double totalWeight   = 0;
+        int    rayCount      = 0;
 
-        // Minimum height gain above current ground to count as a crest
-        final int CREST_THRESHOLD = 2;
+        double crestSurfaceYSum = 0;
+        double crestDistSum     = 0;
+        int    crestRayCount    = 0;
 
-        int fanSteps  = 7;
         int samplePts = Math.min(scanDistance, 20);
         double stepSize = scanDistance / (double) samplePts;
 
-        for (int step = 0; step < fanSteps; step++) {
-            double angleOffset = -fanAngle + (step * (2.0 * fanAngle / (fanSteps - 1)));
-            double rayRad = Math.toRadians(angleOffset);
-            double rayDX  = upwindDX * Math.cos(rayRad) - upwindDZ * Math.sin(rayRad);
-            double rayDZ  = upwindDX * Math.sin(rayRad) + upwindDZ * Math.cos(rayRad);
+        for (int ri = 0; ri < TOTAL_RAYS; ri++) {
+            double rayDeg = (360.0 / TOTAL_RAYS) * ri;
+            double rayRad = Math.toRadians(rayDeg);
+            double rayDX  =  Math.sin(rayRad);
+            double rayDZ  = -Math.cos(rayRad);
 
-            double rayTerrainContrib = 0;
-            double raySurfaceContrib = 0;
-            double rayWeightSum      = 0;
+            // Dot product with upwind vector: 1.0 = fully upwind, -1.0 = fully downwind
+            double dot = rayDX * upwindDX + rayDZ * upwindDZ;
+            // Map dot [-1,1] to directional weight:
+            // upwind (dot=1) → weight 1.0, downwind (dot=-1) → weight DOWNWIND_BIAS
+            double dirWeight = DOWNWIND_BIAS + (1.0 - DOWNWIND_BIAS) * ((dot + 1.0) / 2.0);
 
-            // Track crest for this ray — nearest point >= CREST_THRESHOLD above groundY
-            double rayCrestSurfaceY  = -1;
-            double rayCrestDist      = -1;
+            double rayContrib    = 0;
+            double raySurfContrib = 0;
+            double rayWeightSum  = 0;
+
+            double rayCrestSurfaceY = -1;
+            double rayCrestDist     = -1;
 
             for (int s = 1; s <= samplePts; s++) {
                 double dist = s * stepSize;
                 int sx = (int) Math.round(x + rayDX * dist);
                 int sz = (int) Math.round(z + rayDZ * dist);
 
-                int upwindTerrainY = SnowUtil.findTerrainY(world, sx, sz, scanFromY);
-                if (upwindTerrainY == -1) continue;
+                // Use snow surface for shelter (so existing drifts contribute)
+                int nGroundY = SnowUtil.findGroundY(world, sx, sz, scanFromY);
+                if (nGroundY == -1) continue;
+                int nSnowLayers  = SnowUtil.measureDepthAboveGround(world, sx, nGroundY, sz);
+                double nSurfaceY = nGroundY + (nSnowLayers / 8.0);
 
-                int upwindGroundY    = SnowUtil.findGroundY(world, sx, sz, scanFromY);
-                int upwindSnowLayers = upwindGroundY != -1
-                        ? SnowUtil.measureDepthAboveGround(world, sx, upwindGroundY, sz) : 0;
-                double upwindSurfaceY = upwindTerrainY + (upwindSnowLayers / 8.0);
+                double distWeight  = 1.0 / dist;
+                // Height diff vs our ground — positive = neighbour surface is higher = shelter
+                double heightDiff  = nSurfaceY - groundY;
+                rayContrib    += heightDiff * distWeight;
+                raySurfContrib += nSurfaceY * distWeight;
+                rayWeightSum  += distWeight;
 
-                double distWeight = 1.0 / dist;
-                rayTerrainContrib += (upwindTerrainY - groundY) * distWeight;
-                raySurfaceContrib += upwindSurfaceY * distWeight;
-                rayWeightSum      += distWeight;
-
-                // Crest detection — first point this ray encounters significant height gain
-                if (rayCrestDist < 0 && (upwindSurfaceY - groundY) >= CREST_THRESHOLD) {
-                    rayCrestSurfaceY = upwindSurfaceY;
+                // Crest: only detected on upwind-biased rays (dot > 0.5)
+                if (dot > 0.5 && rayCrestDist < 0 && heightDiff >= CREST_THRESHOLD) {
+                    rayCrestSurfaceY = nSurfaceY;
                     rayCrestDist     = dist;
                 }
             }
 
             if (rayWeightSum > 0) {
-                shelterWeightedDiff += rayTerrainContrib / rayWeightSum;
-                surfaceWeightedY    += raySurfaceContrib / rayWeightSum;
-                totalWeight         += 1.0;
+                double rayScore = (rayContrib / rayWeightSum) * dirWeight;
+                shelterSum   += rayScore;
+                surfaceYSum  += (raySurfContrib / rayWeightSum) * dirWeight;
+                totalWeight  += dirWeight;
                 rayCount++;
             }
 
             if (rayCrestDist > 0) {
                 crestSurfaceYSum += rayCrestSurfaceY;
-                crestDistanceSum += rayCrestDist;
+                crestDistSum     += rayCrestDist;
                 crestRayCount++;
             }
         }
@@ -269,11 +289,11 @@ public class SnowDriftCommand implements CommandExecutor {
         double avgCrestSurfaceY = crestRayCount > 0
                 ? crestSurfaceYSum / crestRayCount : groundY;
         double avgCrestDist     = crestRayCount > 0
-                ? crestDistanceSum / crestRayCount : 0;
+                ? crestDistSum / crestRayCount : 0;
 
         return new FanResult(
-            shelterWeightedDiff / rayCount,
-            surfaceWeightedY    / totalWeight,
+            shelterSum   / totalWeight,
+            surfaceYSum  / totalWeight,
             avgCrestSurfaceY,
             avgCrestDist
         );
