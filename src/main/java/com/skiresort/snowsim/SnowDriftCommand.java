@@ -26,10 +26,6 @@ public class SnowDriftCommand implements CommandExecutor {
             sender.sendMessage(ChatColor.YELLOW + "Usage: /snowdrift <wind_direction> [wind_strength]");
             sender.sendMessage(ChatColor.YELLOW + "  wind_direction: degrees 0=N 90=E 180=S 270=W");
             sender.sendMessage(ChatColor.YELLOW + "  wind_strength:  multiplier, default 1.0");
-            sender.sendMessage(ChatColor.YELLOW + "  Examples:");
-            sender.sendMessage(ChatColor.YELLOW + "    /snowdrift 315       (NW wind, normal)");
-            sender.sendMessage(ChatColor.YELLOW + "    /snowdrift 0 1.5     (strong N wind)");
-            sender.sendMessage(ChatColor.YELLOW + "    /snowdrift 270 0.5   (light W wind)");
             return true;
         }
 
@@ -85,14 +81,19 @@ public class SnowDriftCommand implements CommandExecutor {
         double upwindDX =  Math.sin(windRad);
         double upwindDZ = -Math.cos(windRad);
 
+        // Determine dynamic start/end and steps based on wind direction
+        // If upwindDX is negative, wind is coming from the West (-X), so we start at minX and move +1.
+        // If upwindDX is positive, wind is coming from the East (+X), so we start at maxX and move -1.
+        final int startX = (upwindDX < 0) ? minX : maxX;
+        final int endX   = (upwindDX < 0) ? maxX : minX;
+        final int stepX  = (upwindDX < 0) ? 1 : -1;
+
+        final int startZ = (upwindDZ < 0) ? minZ : maxZ;
+        final int endZ   = (upwindDZ < 0) ? maxZ : minZ;
+        final int stepZ  = (upwindDZ < 0) ? 1 : -1;
+
         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting drift pass...");
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Wind from " + windDeg
-                + "° strength " + windStrength
-                + "  shelter-normaliser: " + shelterNorm);
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Scan: " + scanDistance
-                + " blocks  Fan: ±" + fanAngle
-                + "°  Max drift: " + maxDriftCm + "cm");
-        sender.sendMessage(ChatColor.GRAY + "Progress every 10%.");
+        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Processing from " + startX + "," + startZ + " to " + endX + "," + endZ);
 
         final double fWindStrength  = windStrength;
         final double fUpwindDX      = upwindDX;
@@ -111,7 +112,7 @@ public class SnowDriftCommand implements CommandExecutor {
         final int    fMeltVariance  = meltVariance;
 
         new BukkitRunnable() {
-            int x = minX, z = minZ;
+            int x = startX, z = startZ;
             int processed = 0, drifted = 0, scoured = 0, unchanged = 0;
             int lastPct = 0;
 
@@ -119,19 +120,14 @@ public class SnowDriftCommand implements CommandExecutor {
             public void run() {
                 int done = 0;
                 while (done < colsPerTick) {
-                    if (x > maxX) {
+                    // Completion check based on the step direction
+                    if ((stepX > 0 && x > endX) || (stepX < 0 && x < endX)) {
                         this.cancel();
-                        // Phase 1 done — kick off phase 2 (neighbour smoothing fill)
                         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Drift pass complete!"
                                 + "  Drifted: "   + String.format("%,d", drifted)
                                 + "  Scoured: "   + String.format("%,d", scoured)
                                 + "  Unchanged: " + String.format("%,d", unchanged));
-                        // Smoothing pass temporarily disabled
-                        // int totalIters = plugin.getConfig().getInt("drift.smoothing-iterations", 3);
-                        // sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass (1/" + totalIters + ")...");
-                        // runSmoothingPass(world, minX, maxX, minZ, maxZ,
-                        //         fScanFromY, colsPerTick, fSnowVariance, fMeltVariance,
-                        //         1, totalIters, sender);
+                        
                         plugin.setDriftRunning(false);
                         sender.sendMessage(ChatColor.GREEN + "[SnowSim] Drift complete!");
                         return;
@@ -149,8 +145,13 @@ public class SnowDriftCommand implements CommandExecutor {
                     else                 unchanged++;
 
                     processed++; done++;
-                    z++;
-                    if (z > maxZ) { z = minZ; x++; }
+
+                    // Increment coordinates following the wind
+                    z += stepZ;
+                    if ((stepZ > 0 && z > endZ) || (stepZ < 0 && z < endZ)) {
+                        z = startZ;
+                        x += stepX;
+                    }
 
                     int pct = (int)((processed / (double)totalColumns) * 100);
                     if (pct >= lastPct + 10) {
@@ -165,13 +166,6 @@ public class SnowDriftCommand implements CommandExecutor {
         return true;
     }
 
-    /**
-     * Holds the result of the upwind fan scan:
-     * - shelterScore:       weighted height difference (positive = sheltered)
-     * - weightedSurfaceY:   weighted avg upwind SNOW surface Y (terrain + snow)
-     * - crestSurfaceY:      snow surface Y at the detected ridge crest
-     * - crestDistance:      XZ distance in blocks to the detected ridge crest
-     */
     private static class FanResult {
         final double shelterScore;
         final double weightedSurfaceY;
@@ -186,30 +180,11 @@ public class SnowDriftCommand implements CommandExecutor {
         }
     }
 
-    /**
-     * Context-aware omni-directional shelter scan.
-     *
-     * Casts rays in all directions (360°), not just upwind.
-     * Each ray contributes to a composite shelter score weighted by:
-     *   - Directional alignment: upwind rays count fully, downwind rays count at
-     *     reduced weight (wind_bias). This means existing downwind drifts can
-     *     shelter a column — the drift feeds back into itself.
-     *   - Snow surface height (terrain + snow), not bare terrain only.
-     *     Growing drifts become part of the shelter landscape.
-     *   - Inverse distance: closer features shelter more.
-     *
-     * Crest detection finds the nearest significant height gain across all rays
-     * (biased upwind) for the slope taper cap.
-     */
     private FanResult fanScan(World world, int x, int groundY, int z,
                               double upwindDX, double upwindDZ,
                               int scanDistance, int fanAngle, int scanFromY) {
 
-        // How many rays to cast total across 360 degrees
         final int TOTAL_RAYS  = 16;
-        // Weight applied to downwind rays vs upwind rays (0=ignore downwind, 1=equal weight)
-        // 0.35 means downwind shelter counts for 35% — enough for drift feedback without
-        // removing wind directionality entirely
         final double DOWNWIND_BIAS = 0.35;
         final int CREST_THRESHOLD  = 2;
 
@@ -232,10 +207,7 @@ public class SnowDriftCommand implements CommandExecutor {
             double rayDX  =  Math.sin(rayRad);
             double rayDZ  = -Math.cos(rayRad);
 
-            // Dot product with upwind vector: 1.0 = fully upwind, -1.0 = fully downwind
             double dot = rayDX * upwindDX + rayDZ * upwindDZ;
-            // Map dot [-1,1] to directional weight:
-            // upwind (dot=1) → weight 1.0, downwind (dot=-1) → weight DOWNWIND_BIAS
             double dirWeight = DOWNWIND_BIAS + (1.0 - DOWNWIND_BIAS) * ((dot + 1.0) / 2.0);
 
             double rayContrib    = 0;
@@ -250,20 +222,17 @@ public class SnowDriftCommand implements CommandExecutor {
                 int sx = (int) Math.round(x + rayDX * dist);
                 int sz = (int) Math.round(z + rayDZ * dist);
 
-                // Use snow surface for shelter (so existing drifts contribute)
                 int nGroundY = SnowUtil.findGroundY(world, sx, sz, scanFromY);
                 if (nGroundY == -1) continue;
                 int nSnowLayers  = SnowUtil.measureDepthAboveGround(world, sx, nGroundY, sz);
                 double nSurfaceY = nGroundY + (nSnowLayers / 8.0);
 
                 double distWeight  = 1.0 / dist;
-                // Height diff vs our ground — positive = neighbour surface is higher = shelter
                 double heightDiff  = nSurfaceY - groundY;
                 rayContrib    += heightDiff * distWeight;
                 raySurfContrib += nSurfaceY * distWeight;
                 rayWeightSum  += distWeight;
 
-                // Crest: only detected on upwind-biased rays (dot > 0.5)
                 if (dot > 0.5 && rayCrestDist < 0 && heightDiff >= CREST_THRESHOLD) {
                     rayCrestSurfaceY = nSurfaceY;
                     rayCrestDist     = dist;
@@ -274,8 +243,6 @@ public class SnowDriftCommand implements CommandExecutor {
                 double rayScore = (rayContrib / rayWeightSum) * dirWeight;
                 shelterSum   += rayScore;
                 totalWeight  += dirWeight;
-                // Only use upwind/crosswind rays (dot > 0) for the surface height cap.
-                // This prevents the terrain behind you inflating the cap on windward faces.
                 if (dot > 0) {
                     surfaceYSum  += (raySurfContrib / rayWeightSum) * dirWeight;
                     surfaceWeight += dirWeight;
@@ -315,16 +282,12 @@ public class SnowDriftCommand implements CommandExecutor {
                               int fenceReach, double fencePeakCm, double slopeAngle,
                               int snowVariance, int meltVariance) {
 
-        // 1. Find ground (includes fence tops and cappable water)
         int groundY = SnowUtil.findGroundY(world, x, z, scanFromY);
         if (groundY == -1) return 0;
 
         int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
         double currentCm  = SnowUtil.layersToCm(currentLayers);
 
-        // Building edge guard — check immediate 3x3 neighbours for large ground Y drops.
-        // If any neighbour's ground is >10 blocks different, this is a building/cliff edge.
-        // Skip drift placement entirely to avoid mega artifacts.
         for (int ex = -1; ex <= 1; ex++) {
             for (int ez = -1; ez <= 1; ez++) {
                 if (ex == 0 && ez == 0) continue;
@@ -333,9 +296,8 @@ public class SnowDriftCommand implements CommandExecutor {
             }
         }
 
-        // 2. Fence leeward drift
         double fenceDriftCm  = 0;
-        double fenceCapY     = Double.MAX_VALUE; // cap from fence height
+        double fenceCapY     = Double.MAX_VALUE;
         Material thisBlock   = world.getBlockAt(x, groundY, z).getType();
         boolean thisIsFence  = thisBlock == Material.OAK_FENCE;
 
@@ -346,7 +308,6 @@ public class SnowDriftCommand implements CommandExecutor {
 
                 for (int fy = groundY + 10; fy >= groundY - 2; fy--) {
                     if (world.getBlockAt(fx, fy, fz).getType() == Material.OAK_FENCE) {
-                        // Measure actual fence height
                         int fenceHeightBlocks = 0;
                         for (int fh = fy; world.getBlockAt(fx, fh, fz).getType()
                                 == Material.OAK_FENCE; fh++) {
@@ -354,20 +315,17 @@ public class SnowDriftCommand implements CommandExecutor {
                         }
                         double fenceHeightCm = fenceHeightBlocks * 100.0;
 
-                        // Check burial
                         int fenceTerrainY = SnowUtil.findTerrainY(world, fx, fz, scanFromY);
                         if (fenceTerrainY != -1) {
                             int fenceSnowLayers = SnowUtil.measureDepthAboveGround(
                                     world, fx, fenceTerrainY, fz);
                             double fenceSnowCm = SnowUtil.layersToCm(fenceSnowLayers);
-                            if (fenceSnowCm >= fenceHeightCm) break; // buried, skip
+                            if (fenceSnowCm >= fenceHeightCm) break;
 
                             double taper = Math.cos(
                                     (dist / (double) fenceReach) * (Math.PI / 2));
                             fenceDriftCm = fencePeakCm * taper * windStrength;
 
-                            // Cap: top of fence snow surface
-                            // = fence terrain Y + snow blocks + fence height blocks
                             fenceCapY = fenceTerrainY
                                     + (fenceSnowLayers / 8.0)
                                     + fenceHeightBlocks;
@@ -379,7 +337,6 @@ public class SnowDriftCommand implements CommandExecutor {
             }
         }
 
-        // 3. Fence top settling — only if surrounding snow has reached fence height
         if (thisIsFence) {
             int thisFenceHeight = 0;
             for (int fh = groundY;
@@ -406,17 +363,15 @@ public class SnowDriftCommand implements CommandExecutor {
             if (avgSurroundCm < thisFenceHeightCm) return 0;
         }
 
-        // 4. Fan scan — shelter score + weighted upwind snow surface Y
         FanResult fan = fanScan(world, x, groundY, z,
                 upwindDX, upwindDZ, scanDistance, fanAngle, scanFromY);
 
         if (fan.shelterScore == 0 && fenceDriftCm == 0) return 0;
 
-        // 5. Map shelter score to terrain drift modifier
         double terrainDriftCm = 0;
         if (fan.shelterScore > 0) {
             double fraction = Math.min(fan.shelterScore / shelterNorm, 1.0);
-            fraction = Math.sqrt(fraction); // soften the curve
+            fraction = Math.sqrt(fraction);
             terrainDriftCm = fraction * maxDriftCm * windStrength;
         } else if (fan.shelterScore < 0) {
             if (currentCm < scourThreshCm) {
@@ -426,15 +381,8 @@ public class SnowDriftCommand implements CommandExecutor {
             }
         }
 
-        // 6. Scour neighbour override
-        //    If this column would be scoured, check if any neighbour has a significantly
-        //    higher SNOW SURFACE (ground + snow depth). A deep drift wall next to this
-        //    column physically blocks the wind regardless of terrain slope direction —
-        //    so we compare snow surfaces, not ground Y.
         if (terrainDriftCm < 0 && fenceDriftCm == 0) {
-            // This column's snow surface Y
             double thisSurfaceY = groundY + (currentLayers / 8.0);
-
             int[] ndx = {-1, 0, 1, -1, 1, -1, 0, 1};
             int[] ndz = {-1, -1, -1, 0, 0, 1, 1, 1};
             for (int ni = 0; ni < 8; ni++) {
@@ -443,15 +391,10 @@ public class SnowDriftCommand implements CommandExecutor {
                 int nLayers = SnowUtil.measureDepthAboveGround(
                         world, x + ndx[ni], nGroundY, z + ndz[ni]);
                 double nSurfaceY = nGroundY + (nLayers / 8.0);
-                // If neighbour snow surface is more than 2 blocks above this column's
-                // snow surface, the drift wall is sheltering this column — suppress scour
-                if (nSurfaceY - thisSurfaceY > 2.0) {
-                    return 0;
-                }
+                if (nSurfaceY - thisSurfaceY > 2.0) return 0;
             }
         }
 
-        // Combine terrain and fence drift
         double totalDriftCm = terrainDriftCm + fenceDriftCm;
         if (Math.abs(totalDriftCm) < 6.25) return 0;
 
@@ -461,26 +404,18 @@ public class SnowDriftCommand implements CommandExecutor {
         int newLayers = Math.max(0, currentLayers + deltaLayers);
         if (newLayers == currentLayers) return 0;
 
-        // 7. Apply tapered height cap based on leeward slope angle
         final double SLOPE_TAN = Math.tan(Math.toRadians(slopeAngle));
-
         double terrainCapY;
         if (fan.crestDistance > 0) {
-            // Leeward of a ridge — taper down from the crest snow surface
             terrainCapY = fan.crestSurfaceY - (fan.crestDistance * SLOPE_TAN);
         } else {
-            // Windward or flat — cap at the weighted upwind snow surface height
             terrainCapY = fan.weightedSurfaceY;
         }
 
         double capY = Math.min(terrainCapY, fenceCapY);
         int maxLayersFromCap = (int) Math.floor((capY - groundY) * 8);
 
-        // If column is already above the cap from a previous pass, leave it alone.
-        // Never use the cap as a reason to remove snow — that's not physically meaningful.
         if (currentLayers > maxLayersFromCap) return 0;
-
-        // Only apply cap when adding snow
         if (newLayers > currentLayers) {
             newLayers = Math.min(newLayers, Math.max(0, maxLayersFromCap));
         }
@@ -490,12 +425,7 @@ public class SnowDriftCommand implements CommandExecutor {
         return SnowApplyCommand.writeSnow(world, x, groundY, z,
                 currentLayers, newLayers, snowVariance, meltVariance, random);
     }
-    /**
-     * Phase 2 — Neighbour smoothing fill.
-     * For every column, look at all 8 neighbours. If any neighbour has significantly
-     * more snow, fill this column toward that neighbour proportionally.
-     * This smooths sharp drift edges and fills scoured patches next to deep deposits.
-     */
+
     private void runSmoothingPass(World world, int minX, int maxX, int minZ, int maxZ,
                                   int scanFromY, int colsPerTick,
                                   int snowVariance, int meltVariance,
@@ -518,13 +448,9 @@ public class SnowDriftCommand implements CommandExecutor {
                     if (x > maxX) {
                         this.cancel();
                         sender.sendMessage(ChatColor.GREEN + "[SnowSim] Smoothing pass " + currentIter + "/" + totalIters
-                                + " complete!  Filled: " + String.format("%,d", filled)
-                                + "  Unchanged: "        + String.format("%,d", unchanged));
+                                + " complete!");
 
                         if (currentIter < totalIters) {
-                            // Chain next smoothing iteration
-                            sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting smoothing pass ("
-                                    + (currentIter + 1) + "/" + totalIters + ")...");
                             runSmoothingPass(world, minX, maxX, minZ, maxZ,
                                     scanFromY, colsPerTick, snowVariance, meltVariance,
                                     currentIter + 1, totalIters, sender);
@@ -543,27 +469,11 @@ public class SnowDriftCommand implements CommandExecutor {
                     processed++; done++;
                     z++;
                     if (z > maxZ) { z = minZ; x++; }
-
-                    int pct = (int)((processed / (double)totalColumns) * 100);
-                    if (pct >= lastPct + 10) {
-                        lastPct = pct - (pct % 10);
-                        sender.sendMessage(ChatColor.GRAY + "[SnowSim] Smoothing " + lastPct + "% -- "
-                                + String.format("%,d", processed) + " / "
-                                + String.format("%,d", totalColumns));
-                    }
                 }
             }
         }.runTaskTimer(plugin, 2L, 1L);
     }
 
-    /**
-     * Smooth a single column by filling toward deeper neighbours.
-     * Searches a 5x5 radius for the deepest nearby snow — allows fills to
-     * propagate across wide gullies rather than just immediate neighbours.
-     * Also guards against building edge artifacts by skipping columns where
-     * ground Y differs too much from neighbours (building edges).
-     * Only ever adds snow — never removes.
-     */
     private int smoothColumn(World world, int x, int z, int scanFromY,
                              int reposeLayersThreshold, double fillFraction,
                              int snowVariance, int meltVariance) {
@@ -572,54 +482,35 @@ public class SnowDriftCommand implements CommandExecutor {
         if (groundY == -1) return 0;
 
         int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
-
-        // 5x5 radius search for deepest neighbour snow
-        // Also track max ground Y difference to detect building edges
         int maxNeighbourLayers = currentLayers;
         int maxGroundYDiff     = 0;
 
         for (int dx = -2; dx <= 2; dx++) {
             for (int dz = -2; dz <= 2; dz++) {
                 if (dx == 0 && dz == 0) continue;
-                int nx = x + dx, nz = z + dz;
-                int nGroundY = SnowUtil.findGroundY(world, nx, nz, scanFromY);
+                int nGroundY = SnowUtil.findGroundY(world, x + dx, z + dz, scanFromY);
                 if (nGroundY == -1) continue;
 
-                // Track ground Y difference — large diff = building edge
                 int groundDiff = Math.abs(nGroundY - groundY);
                 if (groundDiff > maxGroundYDiff) maxGroundYDiff = groundDiff;
 
-                int nLayers = SnowUtil.measureDepthAboveGround(world, nx, nGroundY, nz);
-
-                // Compare snow SURFACES (ground + snow), not bare ground.
-                // A deep drift wall on flat or lower ground should still fill into
-                // an adjacent hollow — the surface height is what matters physically.
+                int nLayers = SnowUtil.measureDepthAboveGround(world, x + dx, nGroundY, z + dz);
                 double nSurfaceY    = nGroundY + (nLayers / 8.0);
                 double thisSurfaceY = groundY  + (currentLayers / 8.0);
 
-                // Only fill if neighbour snow surface is higher than ours
-                // This prevents snow being pushed uphill where the surface is already higher
                 if (nSurfaceY <= thisSurfaceY) continue;
-
                 if (nLayers > maxNeighbourLayers) maxNeighbourLayers = nLayers;
             }
         }
 
-        // Building edge guard — if ground drops >10 blocks to any neighbour within 5x5,
-        // this is likely a building/cliff edge. Skip to avoid mega artifacts.
         if (maxGroundYDiff > 10) return 0;
-
         int diff = maxNeighbourLayers - currentLayers;
         if (diff <= reposeLayersThreshold) return 0;
 
         int fillLayers = (int) Math.round((diff - reposeLayersThreshold) * fillFraction);
         if (fillLayers <= 0) return 0;
 
-        int newLayers = currentLayers + fillLayers;
-
         return SnowApplyCommand.writeSnow(world, x, groundY, z,
-                currentLayers, newLayers, snowVariance, meltVariance, random);
+                currentLayers, currentLayers + fillLayers, snowVariance, meltVariance, random);
     }
-
-
 }
