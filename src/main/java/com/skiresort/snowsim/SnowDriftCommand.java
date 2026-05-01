@@ -470,14 +470,17 @@ public class SnowDriftCommand implements CommandExecutor {
             terrainCapY = fan.crestSurfaceY - (fan.crestDistance * SLOPE_TAN);
         } else {
             // Windward or flat — cap at the weighted upwind snow surface height
-            // (prevents windward faces accumulating above incoming flow level)
             terrainCapY = fan.weightedSurfaceY;
         }
 
         double capY = Math.min(terrainCapY, fenceCapY);
         int maxLayersFromCap = (int) Math.floor((capY - groundY) * 8);
 
-        // Only cap when adding snow — never cap scour
+        // If column is already above the cap from a previous pass, leave it alone.
+        // Never use the cap as a reason to remove snow — that's not physically meaningful.
+        if (currentLayers > maxLayersFromCap) return 0;
+
+        // Only apply cap when adding snow
         if (newLayers > currentLayers) {
             newLayers = Math.min(newLayers, Math.max(0, maxLayersFromCap));
         }
