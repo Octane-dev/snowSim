@@ -1,5 +1,5 @@
 name: SnowSim
-version: 1.3.0
+version: 1.4.0
 main: com.skiresort.snowsim.SnowSim
 api-version: 1.20
 description: Snow depth simulation for ski resorts
@@ -19,7 +19,7 @@ commands:
     usage: /snowapply
     permission: snowsim.update
   snowreport:
-    description: Print current snow depth at all reference points
+    description: Print current snow depth at all reference and sample points
     usage: /snowreport
     permission: snowsim.update
   snowreload:
@@ -29,6 +29,14 @@ commands:
   snowdrift:
     description: Apply wind drift pass across the resort
     usage: /snowdrift <wind_direction> [wind_strength]
+    permission: snowsim.update
+  snowmelt:
+    description: Apply elevation-aware melt across the resort
+    usage: /snowmelt <base_cm> <mid_cm> <peak_cm> <mammoth_cm>
+    permission: snowsim.update
+  snowundo:
+    description: Undo the last snow operation (up to 3 levels)
+    usage: /snowundo
     permission: snowsim.update
 
 permissions:
