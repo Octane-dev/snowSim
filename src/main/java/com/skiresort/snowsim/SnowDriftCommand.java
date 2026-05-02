@@ -110,7 +110,7 @@ public class SnowDriftCommand implements CommandExecutor {
                             scanDistance, fanAngle, fWindStrength,
                             maxDriftCm, maxScourCm, scourThreshCm, shelterNorm,
                             fenceReach, fencePeakCm, slopeAngle,
-                            snowVariance, meltVariance);
+                            snowVariance, meltVariance, fUndo);
 
                     if (result > 0) drifted++;
                     else if (result < 0) scoured++;
@@ -242,7 +242,7 @@ public class SnowDriftCommand implements CommandExecutor {
                               double maxDriftCm, double maxScourCm, double scourThreshCm,
                               double shelterNorm,
                               int fenceReach, double fencePeakCm, double slopeAngle,
-                              int snowVariance, int meltVariance) {
+                              int snowVariance, int meltVariance, SnowUndo undo) {
 
         int groundY = SnowUtil.findGroundY(world, x, z, scanFromY);
         if (groundY == -1) return 0;
@@ -315,6 +315,6 @@ public class SnowDriftCommand implements CommandExecutor {
         if (newLayers == currentLayers) return 0;
 
         return SnowApplyCommand.writeSnow(world, x, groundY, z,
-                currentLayers, newLayers, snowVariance, meltVariance, random, fUndo);
+                currentLayers, newLayers, snowVariance, meltVariance, random, undo);
     }
 }
