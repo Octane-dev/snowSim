@@ -131,10 +131,8 @@ public class SnowMeltCommand implements CommandExecutor {
                             if (intDelta < 0) {
                                 int newLayers = Math.max(0, currentLayers + intDelta);
                                 if (newLayers < currentLayers) {
-                                    // Record blocks for undo before changing them
-                                    recordSnowBlocks(world, x, groundY, z, currentLayers);
                                     SnowApplyCommand.writeSnow(world, x, groundY, z,
-                                            currentLayers, newLayers, 0, fMeltVar, random);
+                                            currentLayers, newLayers, 0, fMeltVar, random, plugin.getUndo());
                                     melted++;
                                 } else unchanged++;
                             } else unchanged++;
@@ -159,15 +157,5 @@ public class SnowMeltCommand implements CommandExecutor {
         return true;
     }
 
-    /** Record all snow blocks above groundY for undo */
-    private void recordSnowBlocks(World world, int x, int groundY, int z, int currentLayers) {
-        int fullBlocks   = currentLayers / 8;
-        int partialLayer = currentLayers % 8;
-        for (int i = 1; i <= fullBlocks; i++) {
-            plugin.getUndo().record(world.getBlockAt(x, groundY + i, z));
-        }
-        if (partialLayer > 0) {
-            plugin.getUndo().record(world.getBlockAt(x, groundY + fullBlocks + 1, z));
-        }
-    }
+
 }
