@@ -66,6 +66,9 @@ public class SnowApplyCommand implements CommandExecutor {
                 + String.format("%,d", totalColumns) + " columns.");
         sender.sendMessage(ChatColor.GRAY + "Progress reported every 10%.");
 
+        plugin.getUndo().begin("/snowapply");
+        final SnowUndo fUndo = plugin.getUndo();
+
         final int[]      fDeltas      = deltas;
         final RefPoint[] fRefs        = refs;
         final int        fScanFromY   = scanFromY;
@@ -87,6 +90,7 @@ public class SnowApplyCommand implements CommandExecutor {
                     if (x > maxX) {
                         this.cancel();
                         plugin.setCachedDeltas(null);
+                        fUndo.commit();
                         sender.sendMessage(ChatColor.GREEN + "[SnowSim] Apply complete!"
                                 + "  Added: "     + String.format("%,d", added)
                                 + "  Melted: "    + String.format("%,d", removed)
@@ -95,7 +99,7 @@ public class SnowApplyCommand implements CommandExecutor {
                     }
 
                     int result = processColumn(world, x, z, fScanFromY,
-                            fRefs, fDeltas, fElevWeight, fIdwPower, fSnowVar, fMeltVar);
+                            fRefs, fDeltas, fElevWeight, fIdwPower, fSnowVar, fMeltVar, fUndo);
                     if      (result > 0) added++;
                     else if (result < 0) removed++;
                     else                 unchanged++;
@@ -120,7 +124,7 @@ public class SnowApplyCommand implements CommandExecutor {
     private int processColumn(World world, int x, int z, int scanFromY,
                               RefPoint[] refs, int[] deltas,
                               double elevWeight, double idwPower,
-                              int snowVariance, int meltVariance) {
+                              int snowVariance, int meltVariance, SnowUndo undo) {
 
         // 1. Find true ground (ignores snow)
         int groundY = SnowUtil.findGroundY(world, x, z, scanFromY);
@@ -137,7 +141,7 @@ public class SnowApplyCommand implements CommandExecutor {
         int newLayers = Math.max(0, currentLayers + intDelta);
         if (newLayers == currentLayers) return 0;
 
-        return writeSnow(world, x, groundY, z, currentLayers, newLayers, snowVariance, meltVariance);
+        return writeSnow(world, x, groundY, z, currentLayers, newLayers, snowVariance, meltVariance, new Random(), undo);
     }
 
     /**
@@ -147,12 +151,18 @@ public class SnowApplyCommand implements CommandExecutor {
     static int writeSnow(World world, int x, int groundY, int z,
                          int currentLayers, int newLayers,
                          int snowVariance, int meltVariance) {
-        return writeSnow(world, x, groundY, z, currentLayers, newLayers, snowVariance, meltVariance, new Random());
+        return writeSnow(world, x, groundY, z, currentLayers, newLayers, snowVariance, meltVariance, new Random(), null);
     }
 
     static int writeSnow(World world, int x, int groundY, int z,
                          int currentLayers, int newLayers,
                          int snowVariance, int meltVariance, Random random) {
+        return writeSnow(world, x, groundY, z, currentLayers, newLayers, snowVariance, meltVariance, random, null);
+    }
+
+    static int writeSnow(World world, int x, int groundY, int z,
+                         int currentLayers, int newLayers,
+                         int snowVariance, int meltVariance, Random random, SnowUndo undo) {
 
         boolean isAdding = newLayers > currentLayers;
 
@@ -179,15 +189,32 @@ public class SnowApplyCommand implements CommandExecutor {
             }
         }
 
+        // Record existing snow blocks for undo before clearing
+        if (undo != null) {
+            for (int y = groundY + 1; y <= groundY + 200; y++) {
+                Material mat = world.getBlockAt(x, y, z).getType();
+                if (mat == Material.SNOW_BLOCK || mat == Material.SNOW) {
+                    undo.record(world.getBlockAt(x, y, z));
+                } else break;
+            }
+            // Also record the blocks that will be written (currently air)
+            int futureBlocks = newLayers / 8;
+            int futurePartial = newLayers % 8;
+            for (int i = 0; i < futureBlocks; i++) {
+                undo.record(world.getBlockAt(x, groundY + 1 + i, z));
+            }
+            if (futurePartial > 0) {
+                undo.record(world.getBlockAt(x, groundY + 1 + futureBlocks, z));
+            }
+        }
+
         // Clear all snow above ground by scanning upward until actual air.
-        // This handles cosmetic variance layers sitting higher than calculated depth,
-        // preventing remnant layer artefacts on scour passes.
         for (int y = groundY + 1; y <= groundY + 200; y++) {
             Material mat = world.getBlockAt(x, y, z).getType();
             if (mat == Material.SNOW_BLOCK || mat == Material.SNOW) {
                 world.getBlockAt(x, y, z).setType(Material.AIR, false);
             } else {
-                break; // hit air or non-snow, stop clearing
+                break;
             }
         }
 
