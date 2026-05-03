@@ -302,28 +302,30 @@ public class SnowDriftCommand implements CommandExecutor {
 
                 for (int fy = groundY + 10; fy >= groundY - 2; fy--) {
                     if (world.getBlockAt(fx, fy, fz).getType() == Material.OAK_FENCE) {
+                        // Find the very bottom of this fence stack to get accurate terrain height
+                        int baseFy = fy;
+                        while (world.getBlockAt(fx, baseFy - 1, fz).getType() == Material.OAK_FENCE) {
+                            baseFy--;
+                        }
+
+                        // Calculate total height of the fence stack
                         int fenceHeightBlocks = 0;
-                        for (int fh = fy; world.getBlockAt(fx, fh, fz).getType()
-                                == Material.OAK_FENCE; fh++) {
+                        for (int fh = baseFy; world.getBlockAt(fx, fh, fz).getType() == Material.OAK_FENCE; fh++) {
                             fenceHeightBlocks++;
                         }
 
                         int fenceTerrainY = SnowUtil.findTerrainY(world, fx, fz, scanFromY);
                         if (fenceTerrainY != -1) {
-                            int fenceSnowLayers = SnowUtil.measureDepthAboveGround(
-                                    world, fx, fenceTerrainY, fz);
+                            int fenceSnowLayers = SnowUtil.measureDepthAboveGround(world, fx, fenceTerrainY, fz);
                             
-                            // Once the fence accumulates even 1 layer of snow, it's buried enough
-                            // that normal natural terrain scanning (fanScan) can handle the slope.
-                            if (fenceSnowLayers > 0) break;
+                            // If the snow at the fence has reached the top of the entire fence stack, it's buried
+                            if (fenceSnowLayers >= fenceHeightBlocks * 8) break;
 
-                            double taper = Math.cos(
-                                    (dist / (double) fenceReach) * (Math.PI / 2));
+                            double taper = Math.cos((dist / (double) fenceReach) * (Math.PI / 2));
                             fenceDriftCm = fencePeakCm * taper * windStrength;
 
-                            fenceCapY = fenceTerrainY
-                                    + (fenceSnowLayers / 8.0)
-                                    + fenceHeightBlocks;
+                            // The cap is now the top of the entire fence stack
+                            fenceCapY = fenceTerrainY + (fenceSnowLayers / 8.0) + fenceHeightBlocks;
                         }
                         break;
                     }
