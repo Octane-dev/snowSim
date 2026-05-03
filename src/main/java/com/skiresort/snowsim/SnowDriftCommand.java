@@ -207,7 +207,7 @@ public class SnowDriftCommand implements CommandExecutor {
             double dot = rayDX * upwindDX + rayDZ * upwindDZ;
             double dirWeight = DOWNWIND_BIAS + (1.0 - DOWNWIND_BIAS) * ((dot + 1.0) / 2.0);
 
-            double rayContrib     = 0;
+            double rayContrib      = 0;
             double raySurfContrib = 0;
             double rayWeightSum   = 0;
 
@@ -307,14 +307,15 @@ public class SnowDriftCommand implements CommandExecutor {
                                 == Material.OAK_FENCE; fh++) {
                             fenceHeightBlocks++;
                         }
-                        double fenceHeightCm = fenceHeightBlocks * 100.0;
 
                         int fenceTerrainY = SnowUtil.findTerrainY(world, fx, fz, scanFromY);
                         if (fenceTerrainY != -1) {
                             int fenceSnowLayers = SnowUtil.measureDepthAboveGround(
                                     world, fx, fenceTerrainY, fz);
-                            double fenceSnowCm = SnowUtil.layersToCm(fenceSnowLayers);
-                            if (fenceSnowCm >= fenceHeightCm) break;
+                            
+                            // Once the fence accumulates even 1 layer of snow, it's buried enough
+                            // that normal natural terrain scanning (fanScan) can handle the slope.
+                            if (fenceSnowLayers > 0) break;
 
                             double taper = Math.cos(
                                     (dist / (double) fenceReach) * (Math.PI / 2));
@@ -337,24 +338,29 @@ public class SnowDriftCommand implements CommandExecutor {
                     world.getBlockAt(x, fh, z).getType() == Material.OAK_FENCE; fh++) {
                 thisFenceHeight++;
             }
-            double thisFenceHeightCm = thisFenceHeight * 100.0;
 
-            int surroundLayers = 0, surroundCount = 0;
-            for (int dx = -3; dx <= 3; dx++) {
-                for (int dz2 = -3; dz2 <= 3; dz2++) {
+            // Look exclusively at adjacent blocks to see if the drift has scaled the fence.
+            double maxSurroundSurfaceY = -Double.MAX_VALUE;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz2 = -1; dz2 <= 1; dz2++) {
                     if (dx == 0 && dz2 == 0) continue;
                     int nearGround = SnowUtil.findGroundY(world, x + dx, z + dz2, scanFromY);
                     if (nearGround != -1 && !SnowUtil.FENCE_BLOCKS.contains(
                             world.getBlockAt(x + dx, z + dz2, nearGround).getType())) {
-                        surroundLayers += SnowUtil.measureDepthAboveGround(
+                        int nearLayers = SnowUtil.measureDepthAboveGround(
                                 world, x + dx, nearGround, z + dz2);
-                        surroundCount++;
+                        double nearSurfaceY = nearGround + (nearLayers / 8.0);
+                        if (nearSurfaceY > maxSurroundSurfaceY) {
+                            maxSurroundSurfaceY = nearSurfaceY;
+                        }
                     }
                 }
             }
-            double avgSurroundCm = surroundCount > 0
-                    ? SnowUtil.layersToCm(surroundLayers / surroundCount) : 0;
-            if (avgSurroundCm < thisFenceHeightCm) return 0;
+            
+            // Only allow snow ON the fence block itself once the adjacent snow drift reaches near the top.
+            // Using fenceTopY - 0.25 allows snow to start forming smoothly 2 layers from the top.
+            double fenceTopY = groundY + thisFenceHeight;
+            if (maxSurroundSurfaceY < fenceTopY - 0.25) return 0;
         }
 
         FanResult fan = fanScan(world, x, groundY, z,
