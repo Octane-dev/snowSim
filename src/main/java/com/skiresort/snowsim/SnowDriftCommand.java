@@ -89,7 +89,6 @@ public class SnowDriftCommand implements CommandExecutor {
         final int stepZ  = (upwindDZ < 0) ? 1 : -1;
 
         sender.sendMessage(ChatColor.AQUA + "[SnowSim] Starting drift pass...");
-        sender.sendMessage(ChatColor.AQUA + "[SnowSim] Processing from " + startX + "," + startZ + " to " + endX + "," + endZ);
 
         plugin.getUndo().begin("/snowdrift " + args[0] + (args.length > 1 ? " " + args[1] : ""));
         final SnowUndo fUndo        = plugin.getUndo();
@@ -126,7 +125,6 @@ public class SnowDriftCommand implements CommandExecutor {
                                 + "  Scoured: "   + String.format("%,d", scoured)
                                 + "  Unchanged: " + String.format("%,d", unchanged));
                         plugin.setDriftRunning(false);
-                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Drift complete!");
                         return;
                     }
 
@@ -181,7 +179,7 @@ public class SnowDriftCommand implements CommandExecutor {
 
         final int TOTAL_RAYS  = 16;
         final double DOWNWIND_BIAS = 0.35;
-        final double CREST_HEIGHT_MIN = 0.5; // Meters diff to be a "crest"
+        final double CREST_HEIGHT_MIN = 0.4; 
 
         double shelterSum    = 0;
         double surfaceYSum   = 0;
@@ -193,7 +191,7 @@ public class SnowDriftCommand implements CommandExecutor {
         double crestDistSum     = 0;
         int    crestRayCount    = 0;
 
-        int samplePts = Math.min(scanDistance, 20);
+        int samplePts = Math.min(scanDistance, 24);
         double stepSize = scanDistance / (double) samplePts;
 
         for (int ri = 0; ri < TOTAL_RAYS; ri++) {
@@ -223,12 +221,12 @@ public class SnowDriftCommand implements CommandExecutor {
                 double nSurfaceY = nGroundY + (nSnowLayers / 8.0);
 
                 double distWeight = 1.0 / dist;
-                double heightDiff = nSurfaceY - groundY;
-                rayContrib    += heightDiff * distWeight;
+                double heightDiff = nSurfaceY - (groundY + SnowUtil.measureDepthAboveGround(world, x, groundY, z)/8.0);
+                
+                rayContrib    += (nSurfaceY - groundY) * distWeight; // Rel to base ground
                 raySurfContrib += nSurfaceY * distWeight;
                 rayWeightSum  += distWeight;
 
-                // Detect crests for slope capping
                 if (dot > 0.6 && rayCrestDist < 0 && heightDiff >= CREST_HEIGHT_MIN) {
                     rayCrestSurfaceY = nSurfaceY;
                     rayCrestDist     = dist;
@@ -260,7 +258,7 @@ public class SnowDriftCommand implements CommandExecutor {
         double avgSurfaceY      = surfaceWeight > 0 ? surfaceYSum / surfaceWeight : groundY;
 
         return new FanResult(
-            shelterSum   / totalWeight,
+            (shelterSum / totalWeight) - (SnowUtil.measureDepthAboveGround(world, x, groundY, z)/8.0),
             avgSurfaceY,
             avgCrestSurfaceY,
             avgCrestDist
@@ -280,217 +278,84 @@ public class SnowDriftCommand implements CommandExecutor {
 
         int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
         double currentCm  = SnowUtil.layersToCm(currentLayers);
-
-        // Slope stability safety
-        for (int ex = -1; ex <= 1; ex++) {
-            for (int ez = -1; ez <= 1; ez++) {
-                if (ex == 0 && ez == 0) continue;
-                int eGroundY = SnowUtil.findGroundY(world, x + ex, z + ez, scanFromY);
-                if (eGroundY != -1 && Math.abs(eGroundY - groundY) > 10) return 0;
-            }
-        }
+        double currentSurfaceY = groundY + (currentLayers / 8.0);
 
         double fenceDriftCm  = 0;
         double fenceCapY     = Double.MAX_VALUE;
-        Material thisBlock   = world.getBlockAt(x, groundY, z).getType();
-        boolean thisIsFence  = thisBlock == Material.OAK_FENCE;
 
-        // Specialized Fence Drift check
-        if (!thisIsFence) {
-            for (int dist = 1; dist <= fenceReach; dist++) {
-                int fx = (int) Math.round(x + upwindDX * dist);
-                int fz = (int) Math.round(z + upwindDZ * dist);
-
-                for (int fy = groundY + 15; fy >= groundY - 2; fy--) {
-                    Material mat = world.getBlockAt(fx, fy, fz).getType();
-                    if (mat == Material.OAK_FENCE) {
-                        int baseFy = fy;
-                        while (world.getBlockAt(fx, baseFy - 1, fz).getType() == Material.OAK_FENCE) {
-                            baseFy--;
-                        }
-
-                        int fenceBlockHeight = 0;
-                        int currentCheckY = baseFy;
-                        while (world.getBlockAt(fx, currentCheckY, fz).getType() == Material.OAK_FENCE) {
-                            fenceBlockHeight++;
-                            currentCheckY++;
-                        }
-
-                        int fenceTerrainY = SnowUtil.findTerrainY(world, fx, fz, scanFromY);
-                        if (fenceTerrainY != -1) {
-                            int fenceSnowLayers = SnowUtil.measureDepthAboveGround(world, fx, fenceTerrainY, fz);
-                            
-                            // IF ACTIVE (Not Buried)
-                            if (fenceSnowLayers < fenceBlockHeight * 8) {
-                                double taper = Math.cos((dist / (double) fenceReach) * (Math.PI / 2));
-                                double heightMultiplier = Math.max(1.0, fenceBlockHeight / 2.0);
-                                fenceDriftCm = fencePeakCm * taper * windStrength * heightMultiplier;
-                                // Force a hard cap at the fence top while it's a sieve
-                                fenceCapY = fenceTerrainY + (fenceSnowLayers / 8.0) + fenceBlockHeight;
-                                break; 
-                            }
-                        }
-                    }
+        // Search for upwind fences
+        for (int dist = 1; dist <= fenceReach; dist++) {
+            int fx = (int) Math.round(x + upwindDX * dist);
+            int fz = (int) Math.round(z + upwindDZ * dist);
+            
+            // Scan vertically for fence blocks
+            int fenceY = -1;
+            for (int fy = groundY - 2; fy < groundY + 20; fy++) {
+                if (world.getBlockAt(fx, fy, fz).getType() == Material.OAK_FENCE) {
+                    fenceY = fy;
+                    break;
                 }
-                if (fenceDriftCm > 0) break;
+            }
+
+            if (fenceY != -1) {
+                // Find top of this fence stack
+                int topY = fenceY;
+                while (world.getBlockAt(fx, topY + 1, fz).getType() == Material.OAK_FENCE) {
+                    topY++;
+                }
+                
+                int fenceTerrainY = SnowUtil.findTerrainY(world, fx, fz, scanFromY);
+                int fenceSnowLayers = SnowUtil.measureDepthAboveGround(world, fx, fenceTerrainY, fz);
+                double fenceSnowSurfaceY = fenceTerrainY + (fenceSnowLayers / 8.0);
+                double fenceTopY = topY + 1.0;
+
+                // CAP LOGIC: If snow surface at fence is higher than fence top, sieve is dead.
+                if (fenceSnowSurfaceY < fenceTopY) {
+                    double taper = Math.cos((dist / (double) fenceReach) * (Math.PI / 2));
+                    fenceDriftCm = fencePeakCm * taper * windStrength;
+                    fenceCapY = fenceTopY; // Don't let snow exceed fence top while sieving
+                    break;
+                } else {
+                    // Fence is buried. We stop the specialized loop and let standard terrain logic take over.
+                    break;
+                }
             }
         }
 
-        FanResult fan = fanScan(world, x, groundY, z,
-                upwindDX, upwindDZ, scanDistance, fanAngle, scanFromY);
-
-        if (fan.shelterScore == 0 && fenceDriftCm == 0) return 0;
+        FanResult fan = fanScan(world, x, groundY, z, upwindDX, upwindDZ, scanDistance, fanAngle, scanFromY);
 
         double terrainDriftCm = 0;
         if (fan.shelterScore > 0) {
             double fraction = Math.min(fan.shelterScore / shelterNorm, 1.0);
-            fraction = Math.sqrt(fraction);
-            terrainDriftCm = fraction * maxDriftCm * windStrength;
-        } else if (fan.shelterScore < 0) {
-            if (currentCm < scourThreshCm) {
-                double fraction = Math.min(Math.abs(fan.shelterScore) / shelterNorm, 1.0);
-                fraction = Math.sqrt(fraction);
-                terrainDriftCm = -fraction * maxScourCm * windStrength;
-            }
-        }
-
-        // Valley protection
-        if (terrainDriftCm < 0 && fenceDriftCm == 0) {
-            double thisSurfaceY = groundY + (currentLayers / 8.0);
-            int[] ndx = {-1, 0, 1, -1, 1, -1, 0, 1};
-            int[] ndz = {-1, -1, -1, 0, 0, 1, 1, 1};
-            for (int ni = 0; ni < 8; ni++) {
-                int nGroundY = SnowUtil.findGroundY(world, x + ndx[ni], z + ndz[ni], scanFromY);
-                if (nGroundY == -1) continue;
-                int nLayers = SnowUtil.measureDepthAboveGround(
-                        world, x + ndx[ni], nGroundY, z + ndz[ni]);
-                double nSurfaceY = nGroundY + (nLayers / 8.0);
-                if (nSurfaceY - thisSurfaceY > 2.0) return 0;
-            }
+            terrainDriftCm = Math.sqrt(fraction) * maxDriftCm * windStrength;
+        } else if (fan.shelterScore < 0 && currentCm < scourThreshCm) {
+            double fraction = Math.min(Math.abs(fan.shelterScore) / shelterNorm, 1.0);
+            terrainDriftCm = -Math.sqrt(fraction) * maxScourCm * windStrength;
         }
 
         double totalDriftCm = terrainDriftCm + fenceDriftCm;
-        if (Math.abs(totalDriftCm) < 6.25) return 0;
-
         int deltaLayers = SnowUtil.cmToLayers(totalDriftCm);
         if (deltaLayers == 0) return 0;
 
         int newLayers = Math.max(0, currentLayers + deltaLayers);
-        if (newLayers == currentLayers) return 0;
 
-        // --- SLOPE / CAP CALCULATION ---
+        // --- ENFORCE CAPS ---
         final double SLOPE_TAN = Math.tan(Math.toRadians(slopeAngle));
-        double terrainCapY = Double.MAX_VALUE;
-        
-        if (fan.crestDistance > 0) {
-            // Project slope from crest
-            terrainCapY = fan.crestSurfaceY - (fan.crestDistance * SLOPE_TAN);
-            // Safety: Never let the "terrain cap" be lower than the local upwind ground average
-            // This prevents snow from stopping at obstacle height when it should be deeper.
-            terrainCapY = Math.max(terrainCapY, fan.weightedSurfaceY);
-        } else {
-            terrainCapY = fan.weightedSurfaceY + 2.0; // Give some headroom if no crest found
-        }
+        double terrainCapY = fan.crestDistance > 0 ? 
+                             fan.crestSurfaceY - (fan.crestDistance * SLOPE_TAN) : 
+                             fan.weightedSurfaceY + 5.0;
 
-        double capY = Math.min(terrainCapY, fenceCapY);
-        int maxLayersFromCap = (int) Math.floor((capY - groundY) * 8);
+        // If fence is buried, fenceCapY is MAX_VALUE, allowing terrain drifting to go as high as needed.
+        double finalCapY = Math.min(terrainCapY, fenceCapY);
+        int maxLayersByCap = (int) Math.floor((finalCapY - groundY) * 8);
 
-        // If accumulating, check against cap
         if (newLayers > currentLayers) {
-            newLayers = Math.min(newLayers, Math.max(currentLayers, maxLayersFromCap));
+            newLayers = Math.min(newLayers, Math.max(currentLayers, maxLayersByCap));
         }
 
         if (newLayers == currentLayers) return 0;
 
         return SnowApplyCommand.writeSnow(world, x, groundY, z,
                 currentLayers, newLayers, snowVariance, meltVariance, random, undo);
-    }
-
-    private void runSmoothingPass(World world, int minX, int maxX, int minZ, int maxZ,
-                                  int scanFromY, int colsPerTick,
-                                  int snowVariance, int meltVariance,
-                                  int currentIter, int totalIters,
-                                  CommandSender sender) {
-
-        final int    REPOSE_LAYERS = plugin.getConfig().getInt("drift.smoothing-repose-layers", 5);
-        final double FILL_FRACTION = plugin.getConfig().getDouble("drift.smoothing-fill-fraction", 0.7);
-        int totalColumns = (maxX - minX + 1) * (maxZ - minZ + 1);
-
-        new BukkitRunnable() {
-            int x = minX, z = minZ;
-            int processed = 0, filled = 0, unchanged = 0;
-            int lastPct = 0;
-
-            @Override
-            public void run() {
-                int done = 0;
-                while (done < colsPerTick) {
-                    if (x > maxX) {
-                        this.cancel();
-                        sender.sendMessage(ChatColor.GREEN + "[SnowSim] Smoothing pass " + currentIter + "/" + totalIters
-                                + " complete!");
-
-                        if (currentIter < totalIters) {
-                            runSmoothingPass(world, minX, maxX, minZ, maxZ,
-                                    scanFromY, colsPerTick, snowVariance, meltVariance,
-                                    currentIter + 1, totalIters, sender);
-                        } else {
-                            plugin.setDriftRunning(false);
-                            sender.sendMessage(ChatColor.GREEN + "[SnowSim] All smoothing passes done.");
-                        }
-                        return;
-                    }
-
-                    int result = smoothColumn(world, x, z, scanFromY,
-                            REPOSE_LAYERS, FILL_FRACTION, snowVariance, meltVariance);
-                    if (result > 0) filled++;
-                    else            unchanged++;
-
-                    processed++; done++;
-                    z++;
-                    if (z > maxZ) { z = minZ; x++; }
-                }
-            }
-        }.runTaskTimer(plugin, 2L, 1L);
-    }
-
-    private int smoothColumn(World world, int x, int z, int scanFromY,
-                             int reposeLayersThreshold, double fillFraction,
-                             int snowVariance, int meltVariance) {
-
-        int groundY = SnowUtil.findGroundY(world, x, z, scanFromY);
-        if (groundY == -1) return 0;
-
-        int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
-        int maxNeighbourLayers = currentLayers;
-        int maxGroundYDiff     = 0;
-
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                if (dx == 0 && dz == 0) continue;
-                int nGroundY = SnowUtil.findGroundY(world, x + dx, z + dz, scanFromY);
-                if (nGroundY == -1) continue;
-
-                int groundDiff = Math.abs(nGroundY - groundY);
-                if (groundDiff > maxGroundYDiff) maxGroundYDiff = groundDiff;
-
-                int nLayers = SnowUtil.measureDepthAboveGround(world, x + dx, nGroundY, z + dz);
-                double nSurfaceY    = nGroundY + (nLayers / 8.0);
-                double thisSurfaceY = groundY  + (currentLayers / 8.0);
-
-                if (nSurfaceY <= thisSurfaceY) continue;
-                if (nLayers > maxNeighbourLayers) maxNeighbourLayers = nLayers;
-            }
-        }
-
-        if (maxGroundYDiff > 10) return 0;
-        int diff = maxNeighbourLayers - currentLayers;
-        if (diff <= reposeLayersThreshold) return 0;
-
-        int fillLayers = (int) Math.round((diff - reposeLayersThreshold) * fillFraction);
-        if (fillLayers <= 0) return 0;
-
-        return SnowApplyCommand.writeSnow(world, x, groundY, z,
-                currentLayers, currentLayers + fillLayers, snowVariance, meltVariance, random);
     }
 }
