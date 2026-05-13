@@ -181,7 +181,7 @@ public class SnowDriftCommand implements CommandExecutor {
 
         final int TOTAL_RAYS  = 16;
         final double DOWNWIND_BIAS = 0.35;
-        final int CREST_THRESHOLD  = 1; // Lowered to detect buried fences more easily
+        final int CREST_THRESHOLD  = 1; // Detect significant obstacles
 
         double shelterSum    = 0;
         double surfaceYSum   = 0;
@@ -321,14 +321,14 @@ public class SnowDriftCommand implements CommandExecutor {
                             int fenceSnowLayers = SnowUtil.measureDepthAboveGround(world, fx, fenceTerrainY, fz);
                             
                             // If snow at the fence is higher than the top of the fence blocks,
-                            // the specialized sieve-logic is skipped. We continue the search
-                            // or proceed to normal fanScan (terrain) logic.
+                            // the specialized sieve-logic is skipped.
                             if (fenceSnowLayers < fenceBlockHeight * 8) {
                                 double taper = Math.cos((dist / (double) fenceReach) * (Math.PI / 2));
                                 double heightMultiplier = Math.max(1.0, fenceBlockHeight / 2.0);
                                 fenceDriftCm = fencePeakCm * taper * windStrength * heightMultiplier;
+                                // ONLY cap at fence height if the sieve is actively catching snow.
                                 fenceCapY = fenceTerrainY + (fenceSnowLayers / 8.0) + fenceBlockHeight;
-                                break; // Found active fence sieve
+                                break; 
                             }
                         }
                     }
@@ -389,10 +389,15 @@ public class SnowDriftCommand implements CommandExecutor {
             terrainCapY = fan.weightedSurfaceY;
         }
 
+        // Use the lower of the two caps. 
+        // Note: If the fence is buried, fenceCapY is Double.MAX_VALUE, so terrainCapY wins.
         double capY = Math.min(terrainCapY, fenceCapY);
         int maxLayersFromCap = (int) Math.floor((capY - groundY) * 8);
 
-        if (currentLayers > maxLayersFromCap) return 0;
+        // If we are already above the cap, don't add more.
+        if (currentLayers > maxLayersFromCap && newLayers > currentLayers) return 0;
+        
+        // Clamp the new snow depth to the calculated cap.
         if (newLayers > currentLayers) {
             newLayers = Math.min(newLayers, Math.max(0, maxLayersFromCap));
         }
