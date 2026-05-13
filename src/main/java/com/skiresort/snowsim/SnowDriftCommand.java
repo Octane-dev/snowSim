@@ -81,8 +81,6 @@ public class SnowDriftCommand implements CommandExecutor {
         double upwindDX =  Math.sin(windRad);
         double upwindDZ = -Math.cos(windRad);
 
-        // Process columns from the windward side first so each column benefits
-        // from already-processed upwind neighbours in the same pass.
         final int startX = (upwindDX < 0) ? minX : maxX;
         final int endX   = (upwindDX < 0) ? maxX : minX;
         final int stepX  = (upwindDX < 0) ? 1 : -1;
@@ -300,32 +298,35 @@ public class SnowDriftCommand implements CommandExecutor {
                 int fx = (int) Math.round(x + upwindDX * dist);
                 int fz = (int) Math.round(z + upwindDZ * dist);
 
-                for (int fy = groundY + 10; fy >= groundY - 2; fy--) {
-                    if (world.getBlockAt(fx, fy, fz).getType() == Material.OAK_FENCE) {
-                        // Find the very bottom of this fence stack to get accurate terrain height
+                for (int fy = groundY + 15; fy >= groundY - 2; fy--) {
+                    Material mat = world.getBlockAt(fx, fy, fz).getType();
+                    if (mat == Material.OAK_FENCE) {
                         int baseFy = fy;
                         while (world.getBlockAt(fx, baseFy - 1, fz).getType() == Material.OAK_FENCE) {
                             baseFy--;
                         }
 
-                        // Calculate total height of the fence stack
-                        int fenceHeightBlocks = 0;
-                        for (int fh = baseFy; world.getBlockAt(fx, fh, fz).getType() == Material.OAK_FENCE; fh++) {
-                            fenceHeightBlocks++;
+                        int fenceBlockHeight = 0;
+                        int currentCheckY = baseFy;
+                        while (world.getBlockAt(fx, currentCheckY, fz).getType() == Material.OAK_FENCE) {
+                            fenceBlockHeight++;
+                            currentCheckY++;
                         }
 
                         int fenceTerrainY = SnowUtil.findTerrainY(world, fx, fz, scanFromY);
                         if (fenceTerrainY != -1) {
                             int fenceSnowLayers = SnowUtil.measureDepthAboveGround(world, fx, fenceTerrainY, fz);
                             
-                            // If the snow at the fence has reached the top of the entire fence stack, it's buried
-                            if (fenceSnowLayers >= fenceHeightBlocks * 8) break;
+                            // LOGIC CHANGE: If snow at the fence is higher than the top of the actual fence blocks,
+                            // the fence is physically buried. Treat it as a normal obstacle (return to terrain logic).
+                            if (fenceSnowLayers >= fenceBlockHeight * 8) break;
 
                             double taper = Math.cos((dist / (double) fenceReach) * (Math.PI / 2));
-                            fenceDriftCm = fencePeakCm * taper * windStrength;
+                            double heightMultiplier = Math.max(1.0, fenceBlockHeight / 2.0);
+                            fenceDriftCm = fencePeakCm * taper * windStrength * heightMultiplier;
 
-                            // The cap is now the top of the entire fence stack
-                            fenceCapY = fenceTerrainY + (fenceSnowLayers / 8.0) + fenceHeightBlocks;
+                            // The cap is the top of the fence stack
+                            fenceCapY = fenceTerrainY + (fenceSnowLayers / 8.0) + fenceBlockHeight;
                         }
                         break;
                     }
@@ -341,7 +342,6 @@ public class SnowDriftCommand implements CommandExecutor {
                 thisFenceHeight++;
             }
 
-            // Look exclusively at adjacent blocks to see if the drift has scaled the fence.
             double maxSurroundSurfaceY = -Double.MAX_VALUE;
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dz2 = -1; dz2 <= 1; dz2++) {
@@ -359,8 +359,6 @@ public class SnowDriftCommand implements CommandExecutor {
                 }
             }
             
-            // Only allow snow ON the fence block itself once the adjacent snow drift reaches near the top.
-            // Using fenceTopY - 0.25 allows snow to start forming smoothly 2 layers from the top.
             double fenceTopY = groundY + thisFenceHeight;
             if (maxSurroundSurfaceY < fenceTopY - 0.25) return 0;
         }
