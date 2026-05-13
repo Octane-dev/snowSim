@@ -181,7 +181,7 @@ public class SnowDriftCommand implements CommandExecutor {
 
         final int TOTAL_RAYS  = 16;
         final double DOWNWIND_BIAS = 0.35;
-        final int CREST_THRESHOLD  = 2;
+        final int CREST_THRESHOLD  = 1; // Lowered to detect buried fences more easily
 
         double shelterSum    = 0;
         double surfaceYSum   = 0;
@@ -228,6 +228,7 @@ public class SnowDriftCommand implements CommandExecutor {
                 raySurfContrib += nSurfaceY * distWeight;
                 rayWeightSum  += distWeight;
 
+                // Detect crests for slope capping
                 if (dot > 0.5 && rayCrestDist < 0 && heightDiff >= CREST_THRESHOLD) {
                     rayCrestSurfaceY = nSurfaceY;
                     rayCrestDist     = dist;
@@ -280,6 +281,7 @@ public class SnowDriftCommand implements CommandExecutor {
         int currentLayers = SnowUtil.measureDepthAboveGround(world, x, groundY, z);
         double currentCm  = SnowUtil.layersToCm(currentLayers);
 
+        // Sanity check: slope stability
         for (int ex = -1; ex <= 1; ex++) {
             for (int ez = -1; ez <= 1; ez++) {
                 if (ex == 0 && ez == 0) continue;
@@ -293,6 +295,7 @@ public class SnowDriftCommand implements CommandExecutor {
         Material thisBlock   = world.getBlockAt(x, groundY, z).getType();
         boolean thisIsFence  = thisBlock == Material.OAK_FENCE;
 
+        // Specialized Fence Drift check (only if not buried)
         if (!thisIsFence) {
             for (int dist = 1; dist <= fenceReach; dist++) {
                 int fx = (int) Math.round(x + upwindDX * dist);
@@ -317,52 +320,24 @@ public class SnowDriftCommand implements CommandExecutor {
                         if (fenceTerrainY != -1) {
                             int fenceSnowLayers = SnowUtil.measureDepthAboveGround(world, fx, fenceTerrainY, fz);
                             
-                            // LOGIC CHANGE: If snow at the fence is higher than the top of the actual fence blocks,
-                            // the fence is physically buried. Treat it as a normal obstacle (return to terrain logic).
-                            if (fenceSnowLayers >= fenceBlockHeight * 8) break;
-
-                            double taper = Math.cos((dist / (double) fenceReach) * (Math.PI / 2));
-                            double heightMultiplier = Math.max(1.0, fenceBlockHeight / 2.0);
-                            fenceDriftCm = fencePeakCm * taper * windStrength * heightMultiplier;
-
-                            // The cap is the top of the fence stack
-                            fenceCapY = fenceTerrainY + (fenceSnowLayers / 8.0) + fenceBlockHeight;
+                            // If snow at the fence is higher than the top of the fence blocks,
+                            // the specialized sieve-logic is skipped. We continue the search
+                            // or proceed to normal fanScan (terrain) logic.
+                            if (fenceSnowLayers < fenceBlockHeight * 8) {
+                                double taper = Math.cos((dist / (double) fenceReach) * (Math.PI / 2));
+                                double heightMultiplier = Math.max(1.0, fenceBlockHeight / 2.0);
+                                fenceDriftCm = fencePeakCm * taper * windStrength * heightMultiplier;
+                                fenceCapY = fenceTerrainY + (fenceSnowLayers / 8.0) + fenceBlockHeight;
+                                break; // Found active fence sieve
+                            }
                         }
-                        break;
                     }
                 }
                 if (fenceDriftCm > 0) break;
             }
         }
 
-        if (thisIsFence) {
-            int thisFenceHeight = 0;
-            for (int fh = groundY;
-                    world.getBlockAt(x, fh, z).getType() == Material.OAK_FENCE; fh++) {
-                thisFenceHeight++;
-            }
-
-            double maxSurroundSurfaceY = -Double.MAX_VALUE;
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dz2 = -1; dz2 <= 1; dz2++) {
-                    if (dx == 0 && dz2 == 0) continue;
-                    int nearGround = SnowUtil.findGroundY(world, x + dx, z + dz2, scanFromY);
-                    if (nearGround != -1 && !SnowUtil.FENCE_BLOCKS.contains(
-                            world.getBlockAt(x + dx, z + dz2, nearGround).getType())) {
-                        int nearLayers = SnowUtil.measureDepthAboveGround(
-                                world, x + dx, nearGround, z + dz2);
-                        double nearSurfaceY = nearGround + (nearLayers / 8.0);
-                        if (nearSurfaceY > maxSurroundSurfaceY) {
-                            maxSurroundSurfaceY = nearSurfaceY;
-                        }
-                    }
-                }
-            }
-            
-            double fenceTopY = groundY + thisFenceHeight;
-            if (maxSurroundSurfaceY < fenceTopY - 0.25) return 0;
-        }
-
+        // Standard terrain logic (handles natural hills AND buried fences)
         FanResult fan = fanScan(world, x, groundY, z,
                 upwindDX, upwindDZ, scanDistance, fanAngle, scanFromY);
 
@@ -381,6 +356,7 @@ public class SnowDriftCommand implements CommandExecutor {
             }
         }
 
+        // Prevent scouring if the column is significantly lower than neighbors (valley protection)
         if (terrainDriftCm < 0 && fenceDriftCm == 0) {
             double thisSurfaceY = groundY + (currentLayers / 8.0);
             int[] ndx = {-1, 0, 1, -1, 1, -1, 0, 1};
@@ -404,6 +380,7 @@ public class SnowDriftCommand implements CommandExecutor {
         int newLayers = Math.max(0, currentLayers + deltaLayers);
         if (newLayers == currentLayers) return 0;
 
+        // Apply slope/cap logic
         final double SLOPE_TAN = Math.tan(Math.toRadians(slopeAngle));
         double terrainCapY;
         if (fan.crestDistance > 0) {
